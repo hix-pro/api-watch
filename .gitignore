@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+
+# Local databases and snapshots
+*.db
+*.db-wal
+*.db-shm
+.apiwatch/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
