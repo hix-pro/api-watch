@@ -73,8 +73,17 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-            restrict_permissions(parent, 0o700);
+            if !parent.as_os_str().is_empty() {
+                // Only tighten directories this process creates. Chmodding an
+                // existing user directory (for example /tmp with --db /tmp/x.db)
+                // would unexpectedly lock other users out.
+                let existed = parent.exists();
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+                if !existed {
+                    restrict_permissions(parent, 0o700);
+                }
+            }
         }
 
         let conn = Connection::open(path)
@@ -337,7 +346,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
 
 fn target_from_row(row: &Row<'_>) -> rusqlite::Result<Target> {
     let headers_json: String = row.get(3)?;
-    let headers = serde_json::from_str(&headers_json).unwrap_or_default();
+    let headers = serde_json::from_str(&headers_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(Target {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -375,4 +386,31 @@ pub fn default_db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".apiwatch")
         .join("apiwatch.db")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_restricts_directories_created_by_the_store() {
+        let root = std::env::temp_dir().join(format!("apiwatch-db-perm-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let store = Store::open(&root.join("nested").join("apiwatch.db")).unwrap();
+        drop(store);
+
+        let root_mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let nested_mode = fs::metadata(root.join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(root_mode, 0o755);
+        assert_eq!(nested_mode, 0o700);
+        fs::remove_dir_all(&root).ok();
+    }
 }

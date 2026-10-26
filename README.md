@@ -147,12 +147,16 @@ API Watch compares a flattened set of contract facts and applies different rules
 | Endpoint removed | **Breaking** |
 | Endpoint added | Compatible |
 | Request parameter or body property removed | **Breaking** |
+| Request or response media type removed | **Breaking** |
+| Request or response media type added | Compatible |
 | New required request parameter or property | **Breaking** |
 | New optional request parameter or property | Compatible |
 | Request field becomes required | **Breaking** |
 | Request field becomes optional | Compatible |
 | Response property removed | **Breaking** |
 | Response property added | Compatible |
+| Response header removed | **Breaking** |
+| Response header added | Compatible |
 | Response field is no longer guaranteed | **Breaking** |
 | Response field becomes guaranteed | Compatible |
 | Field type changes (`string` → `integer`, etc.) | **Breaking** |
@@ -170,9 +174,11 @@ API Watch compares a flattened set of contract facts and applies different rules
 
 For generic JSON documents, removed keys and changed types are breaking; added keys are compatible. Arrays are treated as homogeneous and compared using their first element.
 
+A new endpoint brings its whole contract at once, so its required parameters do not fail `--fail-on-breaking`. When an endpoint, response, request body, or media type is added or removed, API Watch reports the owning change once instead of listing every nested fact. Adding a media type to an existing required body is compatible: requiredness belongs to the body, not to each representation.
+
 ## How it works
 
-1. **Fetch** the URL or read the local file. Previous ETags are sent as `If-None-Match`; a `304` records an unchanged check without downloading the spec. Responses are capped at **25 MB** with a **30 second** timeout.
+1. **Fetch** the URL or read the local file. Previous ETags are sent as `If-None-Match`; a `304` records an unchanged check without downloading the spec. HTTP responses and local files are capped at **25 MB**; HTTP requests time out after **30 seconds**. Custom headers are never forwarded across a cross-origin redirect.
 2. **Parse** JSON or YAML and detect OpenAPI/Swagger. Local `$ref`s are resolved (up to 32 levels).
 3. **Flatten** the document into facts keyed by a stable label, for example `POST /pets · body application/json.name` or `GET /pets · 200 application/json[].status`.
 4. **Diff** the new facts against the last stored baseline and classify each change by direction.
@@ -292,13 +298,14 @@ apiwatch history petstore --json
 - Default location: `~/.apiwatch/apiwatch.db`. The directory is created `0700` and the database file is set to `0600` on Unix.
 - Snapshots contain the **full text** of every changed spec. Treat the database as sensitive; do not commit it.
 - Request headers, including bearer tokens, are stored in plaintext so repeated checks can authenticate. Use a least-privilege token and rotate it. Removing a target deletes its data.
+- Custom headers are sent only to the target's origin. If a target redirects to a different scheme, host, or port while custom headers are configured, the check fails instead of forwarding them.
 - API Watch only makes network requests to the URLs you add. There is no telemetry.
 - WAL mode is enabled, so SQLite may create `-wal` and `-shm` files next to the database.
 
 ## Limitations
 
 - **OpenAPI 3.x and Swagger 2.0 only** (plus generic JSON). External `$ref`s are not fetched; unresolved refs are counted and shown as a warning.
-- **Not a full JSON Schema prover.** `allOf`, `oneOf`, and `anyOf` are traversed, but composition is not logically merged. Unusual schemas can produce approximate results.
+- **Not a full JSON Schema prover.** `allOf`, `oneOf`, and `anyOf` are traversed, and `allOf` required fields are merged across branches, but composition is not fully proven. Unusual schemas can produce approximate results.
 - **Static headers only.** No OAuth2 client-credentials flow, mTLS, or signed requests.
 - **No notifications built in.** Use cron/CI and route stdout, or consume `--json`.
 - **No retries.** One attempt per target per run; failed checks are recorded and return code `1`.
@@ -323,7 +330,7 @@ cargo test
 cargo build --release
 ```
 
-The test suite covers OpenAPI and YAML flattening, `$ref` resolution, request/response enum direction, type and required-field changes, generic JSON diffs, header validation, and local file fetching.
+The test suite covers OpenAPI, Swagger 2, and YAML flattening, `$ref` resolution, all media types, response headers, `allOf` required merging, request/response enum direction, type and required-field changes, diff cascade suppression, generic JSON diffs, header validation, local file handling, redirect policy, and CLI exit codes.
 
 ## License
 

@@ -14,12 +14,28 @@ pub enum Area {
     Value,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FactKind {
+    #[default]
+    Field,
+    Operation,
+    Parameter,
+    RequestBody,
+    RequestBodyContent,
+    Response,
+    ResponseContent,
+    ResponseHeader,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fact {
     pub area: Area,
     pub label: String,
     pub type_name: String,
     pub required: bool,
+    #[serde(default)]
+    pub kind: FactKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +168,7 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                     label: label.clone(),
                     type_name: "endpoint".to_string(),
                     required: false,
+                    kind: FactKind::Operation,
                     enum_values: Vec::new(),
                     format: None,
                 },
@@ -178,33 +195,35 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                     .unwrap_or("");
 
                 if location == "body" {
-                    let media = first_media(root, operation_obj, "consumes");
                     let body_label = format!("{label} · body");
+                    let required = parameter_obj
+                        .get("required")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
                     insert_fact(
                         &mut facts,
                         Fact {
                             area: Area::Request,
                             label: body_label.clone(),
                             type_name: "body".to_string(),
-                            required: parameter_obj
-                                .get("required")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
+                            required,
+                            kind: FactKind::RequestBody,
                             enum_values: Vec::new(),
                             format: None,
                         },
                     );
-                    if let Some(schema) = parameter_obj.get("schema") {
-                        flatten_schema(
-                            root,
-                            schema,
-                            &format!("{body_label} {media}"),
-                            Area::Request,
-                            false,
-                            &mut facts,
-                            &mut unresolved_refs,
-                            0,
-                        );
+                    if let Some(schema) = parameter_schema(parameter_obj) {
+                        for media in media_types(root, operation_obj, "consumes") {
+                            flatten_content(
+                                root,
+                                &schema,
+                                &format!("{body_label} {media}"),
+                                Area::Request,
+                                FactKind::RequestBodyContent,
+                                &mut facts,
+                                &mut unresolved_refs,
+                            );
+                        }
                     }
                     continue;
                 }
@@ -221,16 +240,21 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                 let schema = parameter_schema(parameter_obj);
 
                 match schema {
-                    Some(schema) => flatten_schema(
-                        root,
-                        schema,
-                        &parameter_label,
-                        Area::Parameter,
-                        required,
-                        &mut facts,
-                        &mut unresolved_refs,
-                        0,
-                    ),
+                    Some(schema) => {
+                        flatten_schema(
+                            root,
+                            &schema,
+                            &parameter_label,
+                            Area::Parameter,
+                            required,
+                            &mut facts,
+                            &mut unresolved_refs,
+                            0,
+                        );
+                        if let Some(fact) = facts.get_mut(&parameter_label) {
+                            fact.kind = FactKind::Parameter;
+                        }
+                    }
                     None => insert_fact(
                         &mut facts,
                         Fact {
@@ -238,6 +262,7 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                             label: parameter_label,
                             type_name: "any".to_string(),
                             required,
+                            kind: FactKind::Parameter,
                             enum_values: Vec::new(),
                             format: None,
                         },
@@ -298,6 +323,7 @@ fn handle_request_body(
             label: body_label.clone(),
             type_name: "body".to_string(),
             required,
+            kind: FactKind::RequestBody,
             enum_values: Vec::new(),
             format: None,
         },
@@ -306,15 +332,14 @@ fn handle_request_body(
     if let Some(content) = request_body_obj.get("content").and_then(Value::as_object) {
         for (media, media_obj) in content {
             if let Some(schema) = media_obj.get("schema") {
-                flatten_schema(
+                flatten_content(
                     root,
                     schema,
                     &format!("{body_label} {media}"),
                     Area::Request,
-                    required,
+                    FactKind::RequestBodyContent,
                     facts,
                     unresolved_refs,
-                    0,
                 );
             }
         }
@@ -346,6 +371,7 @@ fn handle_responses(
                 label: status_label.clone(),
                 type_name: "response".to_string(),
                 required: true,
+                kind: FactKind::Response,
                 enum_values: Vec::new(),
                 format: None,
             },
@@ -354,34 +380,82 @@ fn handle_responses(
         if let Some(content) = response_obj.get("content").and_then(Value::as_object) {
             for (media, media_obj) in content {
                 if let Some(schema) = media_obj.get("schema") {
-                    flatten_schema(
+                    flatten_content(
                         root,
                         schema,
                         &format!("{status_label} {media}"),
                         Area::Response,
-                        true,
+                        FactKind::ResponseContent,
                         facts,
                         unresolved_refs,
-                        0,
                     );
                 }
             }
-            continue;
+        } else if let Some(schema) = response_obj.get("schema") {
+            // Swagger 2 keeps the response schema inline instead of under `content`.
+            for media in media_types(root, operation, "produces") {
+                flatten_content(
+                    root,
+                    schema,
+                    &format!("{status_label} {media}"),
+                    Area::Response,
+                    FactKind::ResponseContent,
+                    facts,
+                    unresolved_refs,
+                );
+            }
         }
 
-        // Swagger 2 keeps the response schema inline instead of under `content`.
-        if let Some(schema) = response_obj.get("schema") {
-            let media = first_media(root, operation, "produces");
-            flatten_schema(
-                root,
-                schema,
-                &format!("{status_label} {media}"),
-                Area::Response,
-                true,
+        handle_response_headers(root, response_obj, &status_label, facts, unresolved_refs);
+    }
+}
+
+fn handle_response_headers(
+    root: &Value,
+    response: &Map<String, Value>,
+    status_label: &str,
+    facts: &mut BTreeMap<String, Fact>,
+    unresolved_refs: &mut usize,
+) {
+    let Some(headers) = response.get("headers").and_then(Value::as_object) else {
+        return;
+    };
+
+    for (name, header) in headers {
+        let header = resolve(root, header, 0, unresolved_refs);
+        let Some(header_obj) = header.as_object() else {
+            continue;
+        };
+        let header_label = format!("{status_label} header {name}");
+
+        match parameter_schema(header_obj) {
+            Some(schema) => {
+                flatten_schema(
+                    root,
+                    &schema,
+                    &header_label,
+                    Area::Response,
+                    false,
+                    facts,
+                    unresolved_refs,
+                    0,
+                );
+                if let Some(fact) = facts.get_mut(&header_label) {
+                    fact.kind = FactKind::ResponseHeader;
+                }
+            }
+            None => insert_fact(
                 facts,
-                unresolved_refs,
-                0,
-            );
+                Fact {
+                    area: Area::Response,
+                    label: header_label,
+                    type_name: "any".to_string(),
+                    required: false,
+                    kind: FactKind::ResponseHeader,
+                    enum_values: Vec::new(),
+                    format: None,
+                },
+            ),
         }
     }
 }
@@ -413,31 +487,55 @@ fn collect_parameters<'a>(
     parameters
 }
 
-fn parameter_schema(parameter: &Map<String, Value>) -> Option<&Value> {
+fn parameter_schema(parameter: &Map<String, Value>) -> Option<Value> {
     if let Some(schema) = parameter.get("schema") {
-        return Some(schema);
+        return Some(schema.clone());
     }
-    parameter
+    if let Some(schema) = parameter
         .get("content")
         .and_then(Value::as_object)
         .and_then(|content| content.values().next())
         .and_then(|media| media.get("schema"))
+    {
+        return Some(schema.clone());
+    }
+
+    // Swagger 2.0 defines non-body parameters (and response headers) inline
+    // instead of under `schema`. Carry the schema keywords into a synthetic schema.
+    let mut schema = Map::new();
+    for key in ["type", "format", "enum", "items"] {
+        if let Some(value) = parameter.get(key) {
+            schema.insert(key.to_string(), value.clone());
+        }
+    }
+    if schema.is_empty() {
+        None
+    } else {
+        Some(Value::Object(schema))
+    }
 }
 
-fn first_media(root: &Value, operation: &Map<String, Value>, key: &str) -> String {
-    operation
+fn media_types(root: &Value, operation: &Map<String, Value>, key: &str) -> Vec<String> {
+    let mut values: Vec<String> = operation
         .get(key)
         .and_then(Value::as_array)
-        .and_then(|values| values.first())
-        .and_then(Value::as_str)
-        .or_else(|| {
-            root.get(key)
-                .and_then(Value::as_array)
-                .and_then(|values| values.first())
-                .and_then(Value::as_str)
+        .filter(|values| !values.is_empty())
+        .or_else(|| root.get(key).and_then(Value::as_array))
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
         })
-        .unwrap_or("application/json")
-        .to_string()
+        .unwrap_or_default();
+
+    values.sort();
+    values.dedup();
+    if values.is_empty() {
+        values.push("application/json".to_string());
+    }
+    values
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,6 +557,7 @@ fn flatten_schema(
                 label: base.to_string(),
                 type_name: "recursive".to_string(),
                 required,
+                kind: FactKind::Field,
                 enum_values: Vec::new(),
                 format: None,
             },
@@ -475,6 +574,7 @@ fn flatten_schema(
                 label: base.to_string(),
                 type_name: json_type(schema).to_string(),
                 required,
+                kind: FactKind::Field,
                 enum_values: Vec::new(),
                 format: None,
             },
@@ -490,6 +590,7 @@ fn flatten_schema(
             label: base.to_string(),
             type_name: schema_type(schema_obj),
             required,
+            kind: FactKind::Field,
             enum_values: enum_values(schema_obj),
             format: schema_obj
                 .get("format")
@@ -497,6 +598,8 @@ fn flatten_schema(
                 .map(str::to_string),
         },
     );
+
+    let mut composed_required = BTreeSet::new();
 
     if let Some(branches) = schema_obj.get("allOf").and_then(Value::as_array) {
         for branch in branches {
@@ -511,6 +614,11 @@ fn flatten_schema(
                 depth + 1,
             );
         }
+
+        // `required` may live beside `allOf`, or in a different branch than the
+        // property it names. All branches are merged at the same label, so mark
+        // every composed property after the whole composition is flattened.
+        collect_all_of_required(root, schema_obj, &mut composed_required, 0);
     }
 
     for keyword in ["oneOf", "anyOf"] {
@@ -545,6 +653,12 @@ fn flatten_schema(
         }
     }
 
+    for name in &composed_required {
+        if let Some(fact) = facts.get_mut(&format!("{base}.{name}")) {
+            fact.required = true;
+        }
+    }
+
     if let Some(additional) = schema_obj.get("additionalProperties") {
         match additional {
             Value::Bool(true) => insert_fact(
@@ -554,6 +668,7 @@ fn flatten_schema(
                     label: format!("{base}.*"),
                     type_name: "any".to_string(),
                     required: false,
+                    kind: FactKind::Field,
                     enum_values: Vec::new(),
                     format: None,
                 },
@@ -601,6 +716,52 @@ fn flatten_schema(
     }
 }
 
+/// Flatten one request/response media type. The content root is a container,
+/// not a property: requiredness belongs to the body root, and adding a media
+/// type is always compatible for existing clients.
+#[allow(clippy::too_many_arguments)]
+fn flatten_content(
+    root: &Value,
+    schema: &Value,
+    label: &str,
+    area: Area,
+    kind: FactKind,
+    facts: &mut BTreeMap<String, Fact>,
+    unresolved_refs: &mut usize,
+) {
+    flatten_schema(root, schema, label, area, false, facts, unresolved_refs, 0);
+    if let Some(fact) = facts.get_mut(label) {
+        fact.kind = kind;
+    }
+}
+
+/// Collect `required` names from an `allOf` composition. All branches describe
+/// the same object, so a property required in any branch is required overall.
+fn collect_all_of_required(
+    root: &Value,
+    schema: &Map<String, Value>,
+    names: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    if depth > 24 {
+        return;
+    }
+    names.extend(required_set(schema));
+
+    let Some(branches) = schema.get("allOf").and_then(Value::as_array) else {
+        return;
+    };
+    let mut ignored_unresolved = 0;
+    for branch in branches {
+        // Resolve only for reading `required`; flattening the branch later
+        // reports unresolved refs so they are not counted twice.
+        let branch = resolve(root, branch, 0, &mut ignored_unresolved);
+        if let Some(branch_obj) = branch.as_object() {
+            collect_all_of_required(root, branch_obj, names, depth + 1);
+        }
+    }
+}
+
 fn flatten_json(value: &Value) -> Flattened {
     let mut facts = BTreeMap::new();
     flatten_json_value(value, "$", &mut facts, 0);
@@ -625,6 +786,7 @@ fn flatten_json_value(value: &Value, path: &str, facts: &mut BTreeMap<String, Fa
             label: path.to_string(),
             type_name: json_type(value).to_string(),
             required: false,
+            kind: FactKind::Field,
             enum_values: Vec::new(),
             format: None,
         },
@@ -966,6 +1128,157 @@ mod tests {
             .unwrap();
         assert_eq!(status.enum_values, vec!["available", "sold"]);
         assert_eq!(flattened.title.as_deref(), Some("Pets 1.0.0"));
+    }
+
+    #[test]
+    fn flattens_swagger2_parameters_media_types_and_response_headers() {
+        let value = serde_json::json!({
+            "swagger": "2.0",
+            "info": { "title": "Swagger Params", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "get": {
+                        "parameters": [
+                            { "name": "limit", "in": "query", "type": "integer", "format": "int32" },
+                            { "name": "kind", "in": "query", "type": "string", "enum": ["cat", "dog"] }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "schema": {
+                                    "type": "array",
+                                    "items": { "$ref": "#/definitions/Pet" }
+                                },
+                                "headers": {
+                                    "X-Rate-Limit": { "type": "integer", "format": "int32" },
+                                    "X-Tags": { "type": "array", "items": { "type": "string" } }
+                                }
+                            }
+                        }
+                    },
+                    "post": {
+                        "consumes": ["application/json", "application/xml"],
+                        "parameters": [
+                            {
+                                "name": "body",
+                                "in": "body",
+                                "required": true,
+                                "schema": { "$ref": "#/definitions/NewPet" }
+                            }
+                        ],
+                        "responses": { "201": { "description": "created" } }
+                    }
+                }
+            },
+            "definitions": {
+                "Pet": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "name": { "type": "string" }
+                    }
+                },
+                "NewPet": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "tag": { "type": "string" }
+                    }
+                }
+            }
+        });
+
+        let flattened = flatten(&value, Format::OpenApi).unwrap();
+        assert_eq!(flattened.unresolved_refs, 0);
+
+        let limit = &flattened.facts["GET /pets · query limit"];
+        assert_eq!(limit.type_name, "integer");
+        assert_eq!(limit.format.as_deref(), Some("int32"));
+        assert_eq!(limit.kind, FactKind::Parameter);
+        assert!(!limit.required);
+
+        let kind = &flattened.facts["GET /pets · query kind"];
+        assert_eq!(kind.type_name, "string");
+        assert_eq!(kind.enum_values, vec!["cat", "dog"]);
+
+        let body = &flattened.facts["POST /pets · body"];
+        assert_eq!(body.kind, FactKind::RequestBody);
+        assert!(body.required);
+        assert!(
+            flattened
+                .facts
+                .contains_key("POST /pets · body application/json.name")
+        );
+        assert!(
+            flattened
+                .facts
+                .contains_key("POST /pets · body application/xml.name")
+        );
+        assert!(flattened.facts["POST /pets · body application/xml.name"].required);
+
+        assert!(
+            flattened
+                .facts
+                .contains_key("GET /pets · 200 application/json[].id")
+        );
+        let rate_limit = &flattened.facts["GET /pets · 200 header X-Rate-Limit"];
+        assert_eq!(rate_limit.kind, FactKind::ResponseHeader);
+        assert_eq!(rate_limit.type_name, "integer");
+        assert_eq!(rate_limit.format.as_deref(), Some("int32"));
+        assert_eq!(
+            flattened.facts["GET /pets · 200 header X-Tags[]"].type_name,
+            "string"
+        );
+    }
+
+    #[test]
+    fn propagates_all_of_required_names_across_branches() {
+        let value = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Compose", "version": "1" },
+            "paths": {
+                "/pets": {
+                    "post": {
+                        "requestBody": {
+                            "required": true,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "required": ["name"],
+                                        "properties": {
+                                            "parentOnly": { "type": "string" }
+                                        },
+                                        "allOf": [
+                                            {
+                                                "type": "object",
+                                                "required": ["id", "parentOnly"]
+                                            },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": { "type": "integer" },
+                                                    "name": { "type": "string" },
+                                                    "tag": { "type": "string" }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "204": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+
+        let flattened = flatten(&value, Format::OpenApi).unwrap();
+        assert!(flattened.facts["POST /pets · body application/json.id"].required);
+        assert!(flattened.facts["POST /pets · body application/json.name"].required);
+        assert!(flattened.facts["POST /pets · body application/json.parentOnly"].required);
+        assert!(!flattened.facts["POST /pets · body application/json.tag"].required);
     }
 
     #[test]
