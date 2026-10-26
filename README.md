@@ -8,7 +8,7 @@
 
 `apiwatch` saves a baseline of an OpenAPI 3.x, Swagger 2.0, or JSON document, re-fetches it on a schedule or in CI, and reports exactly which parts of the contract changed. With `--fail-on-breaking`, a removed endpoint or a new required field fails the build.
 
-One static binary. Local SQLite. No account, daemon, or cloud service.
+One small binary. Local SQLite. No account, daemon, or cloud service.
 
 ## Why
 
