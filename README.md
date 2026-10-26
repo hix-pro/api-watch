@@ -63,7 +63,7 @@ $ echo $?
 
 ## Install
 
-Requires **Rust 1.85+**. SQLite is bundled; there are no system dependencies.
+Building from source requires **Rust 1.85+**. SQLite is bundled; there are no system dependencies.
 
 ```bash
 git clone https://github.com/hix-pro/api-watch.git
@@ -76,6 +76,14 @@ Or build without installing:
 ```bash
 cargo build --release
 ./target/release/apiwatch --help
+```
+
+Prebuilt Linux x86_64 binary (glibc):
+
+```bash
+curl -LO https://github.com/hix-pro/api-watch/releases/latest/download/apiwatch-x86_64-unknown-linux-gnu
+chmod +x apiwatch-x86_64-unknown-linux-gnu
+sudo mv apiwatch-x86_64-unknown-linux-gnu /usr/local/bin/apiwatch
 ```
 
 ## Quick start
