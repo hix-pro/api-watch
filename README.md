@@ -118,7 +118,7 @@ Headers are stored in the local database so later checks can reuse them. **They 
 | `apiwatch history <name>` | Show past checks. `--limit` (default 10, max 1000), `--json`. |
 | `apiwatch remove <name>` | Stop tracking and delete snapshots, checks, and changes. Alias: `rm`. |
 
-Global option: `--db <path>` selects the database (default `~/.apiwatch/apiwatch.db`, env `APWATCH_DB`).
+Global option: `--db <path>` selects the database (default `~/.apiwatch/apiwatch.db`, env `APIWATCH_DB`).
 
 ### Exit codes
 
@@ -212,7 +212,7 @@ jobs:
 
       - name: Check APIs
         env:
-          APWATCH_DB: ~/.apiwatch/apiwatch.db
+          APIWATCH_DB: ~/.apiwatch/apiwatch.db
           VENDOR_TOKEN: ${{ secrets.VENDOR_TOKEN }}
         run: apiwatch check --fail-on-breaking
 

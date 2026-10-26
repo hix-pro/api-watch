@@ -28,7 +28,7 @@ use crate::spec::{self, Format};
 )]
 pub struct Cli {
     /// Path to the SQLite database (default: ~/.apiwatch/apiwatch.db)
-    #[arg(long, global = true, env = "APWATCH_DB", value_name = "PATH")]
+    #[arg(long, global = true, env = "APIWATCH_DB", value_name = "PATH")]
     pub db: Option<PathBuf>,
 
     #[command(subcommand)]
