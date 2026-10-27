@@ -15,7 +15,7 @@ inputs:
     required: false
     default: ''
   name:
-    description: Target name for `spec` (default: derived from the source).
+    description: 'Target name for `spec` (default: derived from the source).'
     required: false
     default: ''
   check-args:
