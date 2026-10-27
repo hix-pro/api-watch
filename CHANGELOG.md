@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-27
+
 ### Added
 - Composite GitHub Action (`action.yml`) that installs API Watch, re-adds a `spec` target idempotently on a cold cache, and runs `check` — the repository dogfoods it against `examples/spec.yaml`.
 - `examples/spec.yaml`, a minimal OpenAPI 3 document used by the Dogfood workflow and local-file examples.
