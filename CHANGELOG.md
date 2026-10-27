@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Schema flattening no longer expands exponentially: a document with two or more self-references under one node (a binary-tree shape) blew up to billions of labels and exhausted memory during `check`. Expansion is now memoized per `$ref` and label and hard-capped at 100,000 facts per pass, recording one deterministic `truncated` marker fact and surfacing a `fact expansion stopped` warning in `check` output.
+- `add` is now idempotent as documented: re-adding an already-tracked name with the same URL and headers keeps the stored baseline and exits `0`; a different URL or headers exits `1` with guidance to `remove` the target and add again. The composite Action runs `add` unconditionally instead of substring-matching the old error text.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

@@ -119,15 +119,9 @@ runs:
           if [[ -n "$AW_NAME" ]]; then
             add_args+=(--name "$AW_NAME")
           fi
-          if ! add_output=$(apiwatch add "$AW_SPEC" "${add_args[@]}" 2>&1); then
-            # A warm cache already tracks this target; that is the expected path.
-            if [[ "$add_output" == *"already exists"* ]]; then
-              echo "target already tracked; keeping stored baseline"
-            else
-              printf '%s\n' "$add_output" >&2
-              exit 1
-            fi
-          fi
+          # Re-adding an already-tracked name with the same URL and headers is
+          # a no-op, so this is safe with a warm cache.
+          apiwatch add "$AW_SPEC" "${add_args[@]}"
         fi
 
         # AW_CHECK_ARGS is deliberately word-split so callers can pass several flags.

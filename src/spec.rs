@@ -72,6 +72,8 @@ pub struct Flattened {
     pub operations: usize,
     pub title: Option<String>,
     pub unresolved_refs: usize,
+    /// True when the fact budget was spent and expansion stopped early.
+    pub truncated: bool,
 }
 
 impl Flattened {
@@ -129,56 +131,101 @@ pub fn flatten(value: &Value, format: Format) -> Result<Flattened> {
     }
 }
 
+/// Hard cap on the facts collected by one flatten pass. A schema with two or
+/// more self-references under one node (a binary-tree shape) expands
+/// exponentially; the budget keeps memory and work bounded.
+pub const MAX_FACTS: usize = 100_000;
+
+/// Shared state for one flatten pass: the facts collected so far, the `$ref`
+/// expansion memo, and the fact budget. All collections are ordered, so the
+/// result stays deterministic for a given document.
+struct FlattenPass<'a> {
+    root: &'a Value,
+    facts: BTreeMap<String, Fact>,
+    unresolved_refs: usize,
+    /// `(ref pointer, base label)` pairs already expanded in this pass.
+    expanded: BTreeSet<(String, String)>,
+    /// Set once the fact budget is spent; schema expansion stops afterwards.
+    truncated: bool,
+}
+
+impl FlattenPass<'_> {
+    fn insert(&mut self, fact: Fact) {
+        if self.facts.len() < MAX_FACTS {
+            self.facts.entry(fact.label.clone()).or_insert(fact);
+            return;
+        }
+        if !self.truncated {
+            self.truncated = true;
+            let label = fact.label.clone();
+            self.facts.entry(label).or_insert(Fact {
+                area: fact.area,
+                label: fact.label,
+                type_name: "truncated".to_string(),
+                required: fact.required,
+                kind: FactKind::Field,
+                enum_values: Vec::new(),
+                format: None,
+            });
+        }
+    }
+}
+
 fn flatten_openapi(root: &Value) -> Result<Flattened> {
     let paths = root
         .get("paths")
         .and_then(Value::as_object)
         .context("OpenAPI document has no 'paths' object")?;
 
-    let mut facts = BTreeMap::new();
-    let mut unresolved_refs = 0usize;
+    let mut pass = FlattenPass {
+        root,
+        facts: BTreeMap::new(),
+        unresolved_refs: 0,
+        expanded: BTreeSet::new(),
+        truncated: false,
+    };
     let mut operations = 0usize;
     let mut paths: Vec<_> = paths.iter().collect();
     paths.sort_by_key(|(path, _)| *path);
 
     for (path, item) in paths {
-        let item = resolve(root, item, 0, &mut unresolved_refs);
+        let item = resolve(root, item, 0, &mut pass.unresolved_refs);
         let Some(item_obj) = item.as_object() else {
             continue;
         };
 
-        let path_parameters =
-            collect_parameters(root, [item_obj.get("parameters")], &mut unresolved_refs);
+        let path_parameters = collect_parameters(
+            root,
+            [item_obj.get("parameters")],
+            &mut pass.unresolved_refs,
+        );
 
         for method in METHODS {
             let Some(operation) = item_obj.get(method) else {
                 continue;
             };
-            let operation = resolve(root, operation, 0, &mut unresolved_refs);
+            let operation = resolve(root, operation, 0, &mut pass.unresolved_refs);
             let Some(operation_obj) = operation.as_object() else {
                 continue;
             };
 
             operations += 1;
             let label = format!("{} {}", method.to_uppercase(), path);
-            insert_fact(
-                &mut facts,
-                Fact {
-                    area: Area::Operation,
-                    label: label.clone(),
-                    type_name: "endpoint".to_string(),
-                    required: false,
-                    kind: FactKind::Operation,
-                    enum_values: Vec::new(),
-                    format: None,
-                },
-            );
+            pass.insert(Fact {
+                area: Area::Operation,
+                label: label.clone(),
+                type_name: "endpoint".to_string(),
+                required: false,
+                kind: FactKind::Operation,
+                enum_values: Vec::new(),
+                format: None,
+            });
 
             let mut parameters = path_parameters.clone();
             parameters.extend(collect_parameters(
                 root,
                 [operation_obj.get("parameters")],
-                &mut unresolved_refs,
+                &mut pass.unresolved_refs,
             ));
 
             for parameter in parameters.values() {
@@ -200,28 +247,23 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                         .get("required")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    insert_fact(
-                        &mut facts,
-                        Fact {
-                            area: Area::Request,
-                            label: body_label.clone(),
-                            type_name: "body".to_string(),
-                            required,
-                            kind: FactKind::RequestBody,
-                            enum_values: Vec::new(),
-                            format: None,
-                        },
-                    );
+                    pass.insert(Fact {
+                        area: Area::Request,
+                        label: body_label.clone(),
+                        type_name: "body".to_string(),
+                        required,
+                        kind: FactKind::RequestBody,
+                        enum_values: Vec::new(),
+                        format: None,
+                    });
                     if let Some(schema) = parameter_schema(parameter_obj) {
                         for media in media_types(root, operation_obj, "consumes") {
                             flatten_content(
-                                root,
+                                &mut pass,
                                 &schema,
                                 &format!("{body_label} {media}"),
                                 Area::Request,
                                 FactKind::RequestBodyContent,
-                                &mut facts,
-                                &mut unresolved_refs,
                             );
                         }
                     }
@@ -242,71 +284,54 @@ fn flatten_openapi(root: &Value) -> Result<Flattened> {
                 match schema {
                     Some(schema) => {
                         flatten_schema(
-                            root,
+                            &mut pass,
                             &schema,
                             &parameter_label,
                             Area::Parameter,
                             required,
-                            &mut facts,
-                            &mut unresolved_refs,
                             0,
                         );
-                        if let Some(fact) = facts.get_mut(&parameter_label) {
+                        if let Some(fact) = pass.facts.get_mut(&parameter_label) {
                             fact.kind = FactKind::Parameter;
                         }
                     }
-                    None => insert_fact(
-                        &mut facts,
-                        Fact {
-                            area: Area::Parameter,
-                            label: parameter_label,
-                            type_name: "any".to_string(),
-                            required,
-                            kind: FactKind::Parameter,
-                            enum_values: Vec::new(),
-                            format: None,
-                        },
-                    ),
+                    None => pass.insert(Fact {
+                        area: Area::Parameter,
+                        label: parameter_label,
+                        type_name: "any".to_string(),
+                        required,
+                        kind: FactKind::Parameter,
+                        enum_values: Vec::new(),
+                        format: None,
+                    }),
                 }
             }
 
-            handle_request_body(
-                root,
-                operation_obj,
-                &label,
-                &mut facts,
-                &mut unresolved_refs,
-            );
-            handle_responses(
-                root,
-                operation_obj,
-                &label,
-                &mut facts,
-                &mut unresolved_refs,
-            );
+            handle_request_body(&mut pass, operation_obj, &label);
+            handle_responses(&mut pass, operation_obj, &label);
         }
     }
 
     Ok(Flattened {
-        facts,
+        facts: pass.facts,
         format: Format::OpenApi,
         operations,
         title: document_title(root),
-        unresolved_refs,
+        unresolved_refs: pass.unresolved_refs,
+        truncated: pass.truncated,
     })
 }
 
 fn handle_request_body(
-    root: &Value,
+    pass: &mut FlattenPass,
     operation: &Map<String, Value>,
     operation_label: &str,
-    facts: &mut BTreeMap<String, Fact>,
-    unresolved_refs: &mut usize,
 ) {
+    let root = pass.root;
     let Some(request_body) = operation.get("requestBody") else {
         return;
     };
-    let request_body = resolve(root, request_body, 0, unresolved_refs);
+    let request_body = resolve(root, request_body, 0, &mut pass.unresolved_refs);
     let Some(request_body_obj) = request_body.as_object() else {
         return;
     };
@@ -316,78 +341,63 @@ fn handle_request_body(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let body_label = format!("{operation_label} · body");
-    insert_fact(
-        facts,
-        Fact {
-            area: Area::Request,
-            label: body_label.clone(),
-            type_name: "body".to_string(),
-            required,
-            kind: FactKind::RequestBody,
-            enum_values: Vec::new(),
-            format: None,
-        },
-    );
+    pass.insert(Fact {
+        area: Area::Request,
+        label: body_label.clone(),
+        type_name: "body".to_string(),
+        required,
+        kind: FactKind::RequestBody,
+        enum_values: Vec::new(),
+        format: None,
+    });
 
     if let Some(content) = request_body_obj.get("content").and_then(Value::as_object) {
         for (media, media_obj) in content {
             if let Some(schema) = media_obj.get("schema") {
                 flatten_content(
-                    root,
+                    pass,
                     schema,
                     &format!("{body_label} {media}"),
                     Area::Request,
                     FactKind::RequestBodyContent,
-                    facts,
-                    unresolved_refs,
                 );
             }
         }
     }
 }
 
-fn handle_responses(
-    root: &Value,
-    operation: &Map<String, Value>,
-    operation_label: &str,
-    facts: &mut BTreeMap<String, Fact>,
-    unresolved_refs: &mut usize,
-) {
+fn handle_responses(pass: &mut FlattenPass, operation: &Map<String, Value>, operation_label: &str) {
+    let root = pass.root;
     let Some(responses) = operation.get("responses").and_then(Value::as_object) else {
         return;
     };
 
     for (status, response) in responses {
-        let response = resolve(root, response, 0, unresolved_refs);
+        let response = resolve(root, response, 0, &mut pass.unresolved_refs);
         let Some(response_obj) = response.as_object() else {
             continue;
         };
 
         let status_label = format!("{operation_label} · {status}");
-        insert_fact(
-            facts,
-            Fact {
-                area: Area::Response,
-                label: status_label.clone(),
-                type_name: "response".to_string(),
-                required: true,
-                kind: FactKind::Response,
-                enum_values: Vec::new(),
-                format: None,
-            },
-        );
+        pass.insert(Fact {
+            area: Area::Response,
+            label: status_label.clone(),
+            type_name: "response".to_string(),
+            required: true,
+            kind: FactKind::Response,
+            enum_values: Vec::new(),
+            format: None,
+        });
 
         if let Some(content) = response_obj.get("content").and_then(Value::as_object) {
             for (media, media_obj) in content {
                 if let Some(schema) = media_obj.get("schema") {
                     flatten_content(
-                        root,
+                        pass,
                         schema,
                         &format!("{status_label} {media}"),
                         Area::Response,
                         FactKind::ResponseContent,
-                        facts,
-                        unresolved_refs,
                     );
                 }
             }
@@ -395,34 +405,31 @@ fn handle_responses(
             // Swagger 2 keeps the response schema inline instead of under `content`.
             for media in media_types(root, operation, "produces") {
                 flatten_content(
-                    root,
+                    pass,
                     schema,
                     &format!("{status_label} {media}"),
                     Area::Response,
                     FactKind::ResponseContent,
-                    facts,
-                    unresolved_refs,
                 );
             }
         }
 
-        handle_response_headers(root, response_obj, &status_label, facts, unresolved_refs);
+        handle_response_headers(pass, response_obj, &status_label);
     }
 }
 
 fn handle_response_headers(
-    root: &Value,
+    pass: &mut FlattenPass,
     response: &Map<String, Value>,
     status_label: &str,
-    facts: &mut BTreeMap<String, Fact>,
-    unresolved_refs: &mut usize,
 ) {
+    let root = pass.root;
     let Some(headers) = response.get("headers").and_then(Value::as_object) else {
         return;
     };
 
     for (name, header) in headers {
-        let header = resolve(root, header, 0, unresolved_refs);
+        let header = resolve(root, header, 0, &mut pass.unresolved_refs);
         let Some(header_obj) = header.as_object() else {
             continue;
         };
@@ -430,32 +437,20 @@ fn handle_response_headers(
 
         match parameter_schema(header_obj) {
             Some(schema) => {
-                flatten_schema(
-                    root,
-                    &schema,
-                    &header_label,
-                    Area::Response,
-                    false,
-                    facts,
-                    unresolved_refs,
-                    0,
-                );
-                if let Some(fact) = facts.get_mut(&header_label) {
+                flatten_schema(pass, &schema, &header_label, Area::Response, false, 0);
+                if let Some(fact) = pass.facts.get_mut(&header_label) {
                     fact.kind = FactKind::ResponseHeader;
                 }
             }
-            None => insert_fact(
-                facts,
-                Fact {
-                    area: Area::Response,
-                    label: header_label,
-                    type_name: "any".to_string(),
-                    required: false,
-                    kind: FactKind::ResponseHeader,
-                    enum_values: Vec::new(),
-                    format: None,
-                },
-            ),
+            None => pass.insert(Fact {
+                area: Area::Response,
+                label: header_label,
+                type_name: "any".to_string(),
+                required: false,
+                kind: FactKind::ResponseHeader,
+                enum_values: Vec::new(),
+                format: None,
+            }),
         }
     }
 }
@@ -538,21 +533,39 @@ fn media_types(root: &Value, operation: &Map<String, Value>, key: &str) -> Vec<S
     values
 }
 
-#[allow(clippy::too_many_arguments)]
 fn flatten_schema(
-    root: &Value,
+    pass: &mut FlattenPass,
     schema: &Value,
     base: &str,
     area: Area,
     required: bool,
-    facts: &mut BTreeMap<String, Fact>,
-    unresolved_refs: &mut usize,
     depth: usize,
 ) {
+    // The fact budget is spent; unwind without recording anything else.
+    if pass.truncated {
+        return;
+    }
+
     if depth > 24 {
-        insert_fact(
-            facts,
-            Fact {
+        pass.insert(Fact {
+            area,
+            label: base.to_string(),
+            type_name: "recursive".to_string(),
+            required,
+            kind: FactKind::Field,
+            enum_values: Vec::new(),
+            format: None,
+        });
+        return;
+    }
+
+    // Two self-references under one node (or the same `$ref` twice under one
+    // label, as with duplicate `allOf` branches) expand exponentially. Expand
+    // each (ref, label) pair once; a repeat is reported like the depth cutoff.
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let key = (reference.to_string(), base.to_string());
+        if !pass.expanded.insert(key) {
+            pass.insert(Fact {
                 area,
                 label: base.to_string(),
                 type_name: "recursive".to_string(),
@@ -560,78 +573,63 @@ fn flatten_schema(
                 kind: FactKind::Field,
                 enum_values: Vec::new(),
                 format: None,
-            },
-        );
-        return;
+            });
+            return;
+        }
     }
 
-    let schema = resolve(root, schema, 0, unresolved_refs);
+    let root = pass.root;
+    let schema = resolve(root, schema, 0, &mut pass.unresolved_refs);
     let Some(schema_obj) = schema.as_object() else {
-        insert_fact(
-            facts,
-            Fact {
-                area,
-                label: base.to_string(),
-                type_name: json_type(schema).to_string(),
-                required,
-                kind: FactKind::Field,
-                enum_values: Vec::new(),
-                format: None,
-            },
-        );
+        pass.insert(Fact {
+            area,
+            label: base.to_string(),
+            type_name: json_type(schema).to_string(),
+            required,
+            kind: FactKind::Field,
+            enum_values: Vec::new(),
+            format: None,
+        });
         return;
     };
 
     let required_set = required_set(schema_obj);
-    insert_fact(
-        facts,
-        Fact {
-            area,
-            label: base.to_string(),
-            type_name: schema_type(schema_obj),
-            required,
-            kind: FactKind::Field,
-            enum_values: enum_values(schema_obj),
-            format: schema_obj
-                .get("format")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        },
-    );
+    pass.insert(Fact {
+        area,
+        label: base.to_string(),
+        type_name: schema_type(schema_obj),
+        required,
+        kind: FactKind::Field,
+        enum_values: enum_values(schema_obj),
+        format: schema_obj
+            .get("format")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    });
 
     let mut composed_required = BTreeSet::new();
 
     if let Some(branches) = schema_obj.get("allOf").and_then(Value::as_array) {
         for branch in branches {
-            flatten_schema(
-                root,
-                branch,
-                base,
-                area,
-                required,
-                facts,
-                unresolved_refs,
-                depth + 1,
-            );
+            flatten_schema(pass, branch, base, area, required, depth + 1);
         }
 
         // `required` may live beside `allOf`, or in a different branch than the
         // property it names. All branches are merged at the same label, so mark
         // every composed property after the whole composition is flattened.
-        collect_all_of_required(root, schema_obj, &mut composed_required, 0);
+        let mut visited = BTreeSet::new();
+        collect_all_of_required(root, schema_obj, &mut composed_required, 0, &mut visited);
     }
 
     for keyword in ["oneOf", "anyOf"] {
         if let Some(branches) = schema_obj.get(keyword).and_then(Value::as_array) {
             for (index, branch) in branches.iter().enumerate() {
                 flatten_schema(
-                    root,
+                    pass,
                     branch,
                     &format!("{base}[{}]", index + 1),
                     area,
                     required,
-                    facts,
-                    unresolved_refs,
                     depth + 1,
                 );
             }
@@ -641,46 +639,39 @@ fn flatten_schema(
     if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object) {
         for (name, property) in properties {
             flatten_schema(
-                root,
+                pass,
                 property,
                 &format!("{base}.{name}"),
                 area,
                 required_set.contains(name),
-                facts,
-                unresolved_refs,
                 depth + 1,
             );
         }
     }
 
     for name in &composed_required {
-        if let Some(fact) = facts.get_mut(&format!("{base}.{name}")) {
+        if let Some(fact) = pass.facts.get_mut(&format!("{base}.{name}")) {
             fact.required = true;
         }
     }
 
     if let Some(additional) = schema_obj.get("additionalProperties") {
         match additional {
-            Value::Bool(true) => insert_fact(
-                facts,
-                Fact {
-                    area,
-                    label: format!("{base}.*"),
-                    type_name: "any".to_string(),
-                    required: false,
-                    kind: FactKind::Field,
-                    enum_values: Vec::new(),
-                    format: None,
-                },
-            ),
+            Value::Bool(true) => pass.insert(Fact {
+                area,
+                label: format!("{base}.*"),
+                type_name: "any".to_string(),
+                required: false,
+                kind: FactKind::Field,
+                enum_values: Vec::new(),
+                format: None,
+            }),
             Value::Object(_) => flatten_schema(
-                root,
+                pass,
                 additional,
                 &format!("{base}.*"),
                 area,
                 false,
-                facts,
-                unresolved_refs,
                 depth + 1,
             ),
             _ => {}
@@ -688,28 +679,17 @@ fn flatten_schema(
     }
 
     if let Some(items) = schema_obj.get("items") {
-        flatten_schema(
-            root,
-            items,
-            &format!("{base}[]"),
-            area,
-            false,
-            facts,
-            unresolved_refs,
-            depth + 1,
-        );
+        flatten_schema(pass, items, &format!("{base}[]"), area, false, depth + 1);
     }
 
     if let Some(prefix_items) = schema_obj.get("prefixItems").and_then(Value::as_array) {
         for (index, item) in prefix_items.iter().enumerate() {
             flatten_schema(
-                root,
+                pass,
                 item,
                 &format!("{base}[{index}]"),
                 area,
                 false,
-                facts,
-                unresolved_refs,
                 depth + 1,
             );
         }
@@ -719,18 +699,15 @@ fn flatten_schema(
 /// Flatten one request/response media type. The content root is a container,
 /// not a property: requiredness belongs to the body root, and adding a media
 /// type is always compatible for existing clients.
-#[allow(clippy::too_many_arguments)]
 fn flatten_content(
-    root: &Value,
+    pass: &mut FlattenPass,
     schema: &Value,
     label: &str,
     area: Area,
     kind: FactKind,
-    facts: &mut BTreeMap<String, Fact>,
-    unresolved_refs: &mut usize,
 ) {
-    flatten_schema(root, schema, label, area, false, facts, unresolved_refs, 0);
-    if let Some(fact) = facts.get_mut(label) {
+    flatten_schema(pass, schema, label, area, false, 0);
+    if let Some(fact) = pass.facts.get_mut(label) {
         fact.kind = kind;
     }
 }
@@ -742,6 +719,7 @@ fn collect_all_of_required(
     schema: &Map<String, Value>,
     names: &mut BTreeSet<String>,
     depth: usize,
+    visited: &mut BTreeSet<usize>,
 ) {
     if depth > 24 {
         return;
@@ -756,9 +734,16 @@ fn collect_all_of_required(
         // Resolve only for reading `required`; flattening the branch later
         // reports unresolved refs so they are not counted twice.
         let branch = resolve(root, branch, 0, &mut ignored_unresolved);
-        if let Some(branch_obj) = branch.as_object() {
-            collect_all_of_required(root, branch_obj, names, depth + 1);
+        let Some(branch_obj) = branch.as_object() else {
+            continue;
+        };
+        // The same schema node always yields the same required names, so
+        // walking it twice is redundant. Skipping repeats keeps duplicate or
+        // cyclic `allOf` self-references from recursing exponentially here.
+        if !visited.insert(std::ptr::from_ref(branch_obj) as usize) {
+            continue;
         }
+        collect_all_of_required(root, branch_obj, names, depth + 1, visited);
     }
 }
 
@@ -771,6 +756,7 @@ fn flatten_json(value: &Value) -> Flattened {
         operations: 0,
         title: None,
         unresolved_refs: 0,
+        truncated: false,
     }
 }
 
@@ -1331,5 +1317,166 @@ paths:
             "api-example-com"
         );
         assert_eq!(derive_name("/tmp/my-spec.json"), "my-spec");
+    }
+
+    fn recursive_chain() -> Value {
+        serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Chain", "version": "1" },
+            "paths": {
+                "/chain": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/Node" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {
+                            "value": { "type": "integer" },
+                            "next": { "$ref": "#/components/schemas/Node" }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn recursive_tree() -> Value {
+        serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Tree", "version": "1" },
+            "paths": {
+                "/tree": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/Node" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {
+                            "value": { "type": "integer" },
+                            "left": { "$ref": "#/components/schemas/Node" },
+                            "right": { "$ref": "#/components/schemas/Node" }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn linear_self_recursion_stays_bounded_without_truncation() {
+        let flattened = flatten(&recursive_chain(), Format::OpenApi).unwrap();
+        assert_eq!(flattened.fact_count(), 53);
+        assert!(!flattened.truncated);
+        assert!(
+            !flattened
+                .facts
+                .values()
+                .any(|fact| fact.type_name == "truncated")
+        );
+        // The depth cutoff marks the first label past 24 property hops.
+        let marker = "GET /chain · 200 application/json".to_string() + &".next".repeat(25);
+        assert_eq!(
+            flattened
+                .facts
+                .get(&marker)
+                .map(|fact| fact.type_name.as_str()),
+            Some("recursive")
+        );
+    }
+
+    #[test]
+    fn binary_tree_self_recursion_truncates_at_the_fact_budget() {
+        // Two self-references under one node used to expand exponentially
+        // (2^24 labels) and exhaust memory; the budget must stop it.
+        let flattened = flatten(&recursive_tree(), Format::OpenApi).unwrap();
+        assert!(flattened.truncated);
+        assert!(flattened.fact_count() <= MAX_FACTS + 1);
+        assert!(
+            flattened
+                .facts
+                .values()
+                .any(|fact| fact.type_name == "truncated")
+        );
+    }
+
+    #[test]
+    fn duplicate_all_of_self_references_stop_at_the_expansion_memo() {
+        // Two `allOf` branches re-enter the same schema under the same label;
+        // without the memo this doubles work every level (2^24 calls).
+        let value = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "AllOf", "version": "1" },
+            "paths": {
+                "/x": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/Self" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Self": {
+                        "type": "object",
+                        "allOf": [
+                            { "$ref": "#/components/schemas/Self" },
+                            { "$ref": "#/components/schemas/Self" }
+                        ],
+                        "properties": { "v": { "type": "string" } }
+                    }
+                }
+            }
+        });
+
+        let flattened = flatten(&value, Format::OpenApi).unwrap();
+        assert!(!flattened.truncated);
+        assert_eq!(flattened.fact_count(), 4);
+        assert!(
+            flattened
+                .facts
+                .contains_key("GET /x · 200 application/json.v")
+        );
+    }
+
+    #[test]
+    fn flattening_is_deterministic_across_runs() {
+        for spec in [recursive_tree(), recursive_chain()] {
+            let first = flatten(&spec, Format::OpenApi).unwrap();
+            let second = flatten(&spec, Format::OpenApi).unwrap();
+            assert_eq!(first.facts, second.facts);
+            assert_eq!(first.truncated, second.truncated);
+            assert_eq!(first.unresolved_refs, second.unresolved_refs);
+        }
     }
 }

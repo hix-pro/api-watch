@@ -135,8 +135,12 @@ fn add(store: &Store, args: AddArgs) -> Result<i32> {
     validate_name(&name)?;
 
     let headers = parse_headers(&args.headers)?;
-    let target = store.add_target(&name, source, &headers, &now())?;
-    report::print_added(&target);
+    let (target, already_tracked) = store.add_target(&name, source, &headers, &now())?;
+    if already_tracked {
+        report::print_already_tracked(&target);
+    } else {
+        report::print_added(&target);
+    }
     Ok(0)
 }
 
@@ -247,6 +251,7 @@ fn check_target(store: &mut Store, target: &Target) -> Result<TargetReport> {
             http_status: fetched.http_status,
             message: Some(message),
             unresolved_refs: 0,
+            truncated: false,
             changes: Vec::new(),
         });
     }
@@ -457,6 +462,7 @@ fn report_from_flattened(
         http_status,
         message,
         unresolved_refs: flattened.unresolved_refs,
+        truncated: flattened.truncated,
         changes,
     }
 }
@@ -496,6 +502,7 @@ fn error_report(
         http_status,
         message: Some(message),
         unresolved_refs: 0,
+        truncated: false,
         changes: Vec::new(),
     })
 }

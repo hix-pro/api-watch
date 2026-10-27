@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::db::{Check, Target};
 use crate::diff::{Change, ChangeKind};
+use crate::spec::MAX_FACTS;
 use crate::style::{bold, cyan, dim, green, red, yellow};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct TargetReport {
     pub http_status: Option<u16>,
     pub message: Option<String>,
     pub unresolved_refs: usize,
+    pub truncated: bool,
     pub changes: Vec<Change>,
 }
 
@@ -162,6 +164,16 @@ fn print_report(report: &TargetReport) {
             yellow(&format!(
                 "warning: {} $ref(s) could not be resolved",
                 report.unresolved_refs
+            ))
+        );
+    }
+
+    if report.truncated {
+        println!(
+            "  {}",
+            yellow(&format!(
+                "warning: fact expansion stopped at the {MAX_FACTS} fact budget; \
+                 recursive or deeply nested schemas were truncated"
             ))
         );
     }
@@ -343,6 +355,23 @@ pub fn print_added(target: &Target) {
     }
     println!();
     println!("Next: {}", bold(&format!("apiwatch check {}", target.name)));
+}
+
+/// Re-adding an already-tracked target with the same identity is a no-op:
+/// the stored baseline and history stay untouched.
+pub fn print_already_tracked(target: &Target) {
+    println!("{} {}", cyan("Already tracked"), bold(&target.name));
+    println!("  {:<9} {}", dim("URL"), target.url);
+    if !target.headers.is_empty() {
+        let mut names: Vec<&str> = target.headers.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        println!("  {:<9} {}", dim("Headers"), names.join(", "));
+    }
+    println!();
+    println!(
+        "Keeping the stored baseline. Next: {}",
+        bold(&format!("apiwatch check {}", target.name))
+    );
 }
 
 pub fn print_removed(name: &str) {

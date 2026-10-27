@@ -121,7 +121,7 @@ Headers are stored in the local database so later checks can reuse them. **They 
 
 | Command | Description |
 | --- | --- |
-| `apiwatch add <source>` | Track a URL or local path. `--name` overrides the derived name; `-H/--header` adds a request header. |
+| `apiwatch add <source>` | Track a URL or local path. `--name` overrides the derived name; `-H/--header` adds a request header. Re-adding an already-tracked name with the same URL and headers is a no-op that keeps the stored baseline; a different URL or headers exits `1` (use `remove` first to replace the target). |
 | `apiwatch check [name]` | Fetch and compare. No name checks every target. `--json`, `--fail-on-breaking`. |
 | `apiwatch list` | Show targets and their last result. Alias: `ls`. `--json`. |
 | `apiwatch history <name>` | Show past checks. `--limit` (default 10, max 1000), `--json`. |
@@ -181,7 +181,7 @@ A new endpoint brings its whole contract at once, so its required parameters do 
 
 1. **Fetch** the URL or read the local file. Previous ETags are sent as `If-None-Match`; a `304` records an unchanged check without downloading the spec. HTTP responses and local files are capped at **25 MB**; HTTP requests time out after **30 seconds**. Custom headers are never forwarded across a cross-origin redirect.
 2. **Parse** JSON or YAML and detect OpenAPI/Swagger. Local `$ref`s are resolved (up to 32 levels).
-3. **Flatten** the document into facts keyed by a stable label, for example `POST /pets · body application/json.name` or `GET /pets · 200 application/json[].status`.
+3. **Flatten** the document into facts keyed by a stable label, for example `POST /pets · body application/json.name` or `GET /pets · 200 application/json[].status`. Self-referential schemas are bounded: a `$ref` is expanded once per label, and runaway expansion stops at a 100,000-fact budget, recording a deterministic `truncated` marker that `check` surfaces as a warning.
 4. **Diff** the new facts against the last stored baseline and classify each change by direction.
 5. **Store** the snapshot, check, and individual changes in SQLite. Only changed-or-first documents store a new snapshot; unchanged checks store just the check row.
 
@@ -212,7 +212,7 @@ The repository ships a composite action that installs API Watch and runs `check`
     check-args: --fail-on-breaking
 ```
 
-Passing `spec` makes cache eviction self-healing: on a warm cache the target already exists and re-adding is a no-op, on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), and `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you). Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
+Passing `spec` makes cache eviction self-healing: `add` is idempotent, so on a warm cache re-adding the already-tracked name with the same URL and headers is a no-op that keeps the stored baseline (a different URL or headers fails the step, since the name would point at another contract), and on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), and `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you). Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
 
 ### Scheduled check with a cached baseline
 

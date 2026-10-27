@@ -110,15 +110,26 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Track a target. Re-adding an existing name with the same URL and
+    /// headers is a no-op (returns the stored target, `true`) so callers can
+    /// run `add` unconditionally with a warm cache; a different identity is
+    /// an error because the name points at another contract.
     pub fn add_target(
         &self,
         name: &str,
         url: &str,
         headers: &BTreeMap<String, String>,
         now: &str,
-    ) -> Result<Target> {
-        if self.target(name)?.is_some() {
-            bail!("target '{name}' already exists");
+    ) -> Result<(Target, bool)> {
+        if let Some(existing) = self.target(name)? {
+            if existing.url == url && existing.headers == *headers {
+                return Ok((existing, true));
+            }
+            bail!(
+                "target '{name}' already exists with a different URL or headers (stored URL: {stored}); \
+                 remove it with `apiwatch remove {name}` and add the new source again",
+                stored = existing.url
+            );
         }
         let headers_json = serde_json::to_string(headers)?;
         self.conn.execute(
@@ -128,6 +139,7 @@ impl Store {
         )?;
         self.target(name)?
             .with_context(|| format!("target '{name}' disappeared after insert"))
+            .map(|target| (target, false))
     }
 
     pub fn target(&self, name: &str) -> Result<Option<Target>> {
@@ -411,6 +423,39 @@ mod tests {
             & 0o777;
         assert_eq!(root_mode, 0o755);
         assert_eq!(nested_mode, 0o700);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn readding_the_same_identity_keeps_the_stored_target() {
+        let root = std::env::temp_dir().join(format!("apiwatch-db-add-{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let store = Store::open(&root.join("apiwatch.db")).unwrap();
+
+        let (first, tracked) = store
+            .add_target("t", "https://a.example.com", &BTreeMap::new(), "t0")
+            .unwrap();
+        assert!(!tracked);
+
+        let (second, tracked) = store
+            .add_target("t", "https://a.example.com", &BTreeMap::new(), "t1")
+            .unwrap();
+        assert!(tracked);
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.created_at, "t0");
+
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer t".to_string());
+        let error = store
+            .add_target("t", "https://a.example.com", &headers, "t2")
+            .unwrap_err();
+        assert!(error.to_string().contains("different URL or headers"));
+        let error = store
+            .add_target("t", "https://b.example.com", &BTreeMap::new(), "t3")
+            .unwrap_err();
+        assert!(error.to_string().contains("different URL or headers"));
+        assert!(error.to_string().contains("apiwatch remove t"));
+
         fs::remove_dir_all(&root).ok();
     }
 }
