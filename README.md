@@ -3,6 +3,7 @@
 **Catch breaking changes in the APIs you depend on — before they reach production.**
 
 [![CI](https://github.com/hix-pro/api-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/hix-pro/api-watch/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hix-pro/api-watch)](https://github.com/hix-pro/api-watch/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
