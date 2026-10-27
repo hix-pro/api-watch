@@ -1,0 +1,45 @@
+openapi: 3.0.3
+info:
+  title: API Watch example API
+  version: 1.0.0
+  description: >-
+    A minimal spec used by the repository's Dogfood workflow and the local-file
+    examples in this README. Replace it with the spec of the API you depend on.
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users
+      responses:
+        "200":
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: Fetch one user
+      responses:
+        "200":
+          description: A single user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+components:
+  schemas:
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        name:
+          type: string

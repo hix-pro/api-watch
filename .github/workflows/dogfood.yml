@@ -1,0 +1,25 @@
+name: Dogfood
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: api-watch tracks its example spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uses the action.yml in this repository. Every run starts from a cold
+      # database, so this exercises the documented first-run path: record a
+      # baseline from the local example spec, then check it (exit 0).
+      - uses: ./
+        with:
+          spec: examples/spec.yaml
+          name: example
+          check-args: --fail-on-breaking

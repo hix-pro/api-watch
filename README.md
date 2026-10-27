@@ -198,7 +198,23 @@ src/
 
 ## CI
 
-The key detail: CI needs a persistent baseline. Keep the SQLite database in a cache, a private artifact store, or a self-hosted persistent volume. If the cache is cold, API Watch records a baseline and exits `0`.
+The key detail: CI needs a persistent baseline. Keep the SQLite database in a cache, a private artifact store, or a self-hosted persistent volume. If the cache is cold and the database is empty, `apiwatch check` reports `no targets yet` and exits `1` — re-add the targets with `apiwatch add`, and the first check records a baseline and exits `0`.
+
+## GitHub Action
+
+The repository ships a composite action that installs API Watch and runs `check` — no Rust setup in your workflow:
+
+```yaml
+- uses: hix-pro/api-watch@v0.1.0
+  with:
+    spec: openapi.yaml        # re-added automatically when the cache is cold
+    name: my-api
+    check-args: --fail-on-breaking
+```
+
+Passing `spec` makes cache eviction self-healing: on a warm cache the target already exists and re-adding is a no-op, on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), and `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you). Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
+
+### Scheduled check with a cached baseline
 
 ```yaml
 name: API contract watch

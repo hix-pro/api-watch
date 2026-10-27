@@ -1,0 +1,67 @@
+name: API Watch
+description: >-
+  Catch breaking changes in the APIs you depend on, straight from CI.
+  Compares each fetch against a stored baseline.
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  spec:
+    description: >-
+      URL or local path of an OpenAPI 3.x, Swagger 2.0, or JSON document to
+      track before checking. Re-adding an already-tracked name is a no-op, so
+      this is safe with a warm cache.
+    required: false
+    default: ''
+  name:
+    description: Target name for `spec` (default: derived from the source).
+    required: false
+    default: ''
+  check-args:
+    description: Arguments passed to `apiwatch check` (e.g. `--fail-on-breaking`).
+    required: false
+    default: ''
+  db-path:
+    description: SQLite database path. Cache this file between runs to keep the baseline.
+    required: false
+    default: '~/.apiwatch/apiwatch.db'
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Install API Watch
+      shell: bash
+      run: cargo install --locked --path "$GITHUB_ACTION_PATH"
+
+    - name: Run API Watch
+      shell: bash
+      env:
+        AW_SPEC: ${{ inputs.spec }}
+        AW_NAME: ${{ inputs.name }}
+        AW_CHECK_ARGS: ${{ inputs.check-args }}
+        AW_DB: ${{ inputs.db-path }}
+      run: |
+        export APIWATCH_DB="${AW_DB/#\~/$HOME}"
+
+        if [[ -n "$AW_SPEC" ]]; then
+          add_args=()
+          if [[ -n "$AW_NAME" ]]; then
+            add_args+=(--name "$AW_NAME")
+          fi
+          if ! add_output=$(apiwatch add "$AW_SPEC" "${add_args[@]}" 2>&1); then
+            # A warm cache already tracks this target; that is the expected path.
+            if [[ "$add_output" == *"already exists"* ]]; then
+              echo "target already tracked; keeping stored baseline"
+            else
+              printf '%s\n' "$add_output" >&2
+              exit 1
+            fi
+          fi
+        fi
+
+        # AW_CHECK_ARGS is deliberately word-split so callers can pass several flags.
+        # shellcheck disable=SC2086
+        exec apiwatch check $AW_CHECK_ARGS
