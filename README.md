@@ -205,7 +205,7 @@ The key detail: CI needs a persistent baseline. Keep the SQLite database in a ca
 The repository ships a composite action that installs API Watch and runs `check` — no Rust setup in your workflow:
 
 ```yaml
-- uses: hix-pro/api-watch@v0.2.0
+- uses: hix-pro/api-watch@v0.3.0
   with:
     spec: openapi.yaml        # re-added automatically when the cache is cold
     name: my-api
