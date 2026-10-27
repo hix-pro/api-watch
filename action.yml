@@ -30,9 +30,77 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
+    # Prefers the prebuilt binary attached to the release matching the action
+    # ref (e.g. @v0.3.0). Anything else — a branch or SHA ref, `uses: ./`,
+    # an unsupported platform, or a release without binaries — falls back to
+    # building from source below.
+    - name: Try prebuilt binary
+      id: prebuilt
+      shell: bash
+      continue-on-error: true
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPO: ${{ github.action_repository }}
+      run: |
+        set -euo pipefail
+        case "$ACTION_REF" in
+          refs/tags/v[0-9]*) tag="${ACTION_REF#refs/tags/}" ;;
+          v[0-9]*) tag="$ACTION_REF" ;;
+          *)
+            echo "action ref '$ACTION_REF' is not a version tag; building from source"
+            exit 1
+            ;;
+        esac
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        windows=false
+        case "$os" in
+          Linux)
+            target="x86_64-unknown-linux-gnu"
+            ;;
+          Darwin)
+            if [[ "$arch" == "arm64" ]]; then
+              target="aarch64-apple-darwin"
+            else
+              target="x86_64-apple-darwin"
+            fi
+            ;;
+          MINGW*|MSYS*|CYGWIN*)
+            target="x86_64-pc-windows-msvc"
+            windows=true
+            ;;
+          *)
+            echo "unsupported platform ($os/$arch); building from source"
+            exit 1
+            ;;
+        esac
+        suffix=""
+        if [[ "$windows" == "true" ]]; then
+          suffix=".exe"
+        fi
+        asset="apiwatch-${target}.tar.gz"
+        url="https://github.com/${ACTION_REPO}/releases/download/${tag}/${asset}"
+        tmp="$(mktemp -d)"
+        echo "downloading $url"
+        curl -fsSL "$url" -o "$tmp/$asset"
+        tar -xzf "$tmp/$asset" -C "$tmp"
+        bin_dir="$RUNNER_TEMP/hix-bin"
+        if command -v cygpath >/dev/null 2>&1; then
+          bin_dir="$(cygpath -u "$RUNNER_TEMP")/hix-bin"
+        fi
+        mkdir -p "$bin_dir"
+        install "$tmp/apiwatch-${target}/apiwatch${suffix}" "$bin_dir/"
+        "$bin_dir/apiwatch${suffix}" --version
+        echo "$bin_dir" >> "$GITHUB_PATH"
+        echo "found=true" >> "$GITHUB_OUTPUT"
+        echo "installed prebuilt binary for $target"
 
-    - name: Install API Watch
+    - name: Install Rust toolchain
+      if: ${{ steps.prebuilt.outputs.found != 'true' }}
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install API Watch from source
+      if: ${{ steps.prebuilt.outputs.found != 'true' }}
       shell: bash
       run: cargo install --locked --path "$GITHUB_ACTION_PATH"
 
