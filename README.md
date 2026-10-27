@@ -79,12 +79,12 @@ cargo build --release
 ./target/release/apiwatch --help
 ```
 
-Prebuilt Linux x86_64 binary (glibc):
+Prebuilt binaries — every version ships tarballs for Linux x86_64 (glibc), macOS (Apple Silicon), and Windows x86_64, each with a SHA-256 checksum:
 
 ```bash
-curl -LO https://github.com/hix-pro/api-watch/releases/latest/download/apiwatch-x86_64-unknown-linux-gnu
-chmod +x apiwatch-x86_64-unknown-linux-gnu
-sudo mv apiwatch-x86_64-unknown-linux-gnu /usr/local/bin/apiwatch
+curl -LO https://github.com/hix-pro/api-watch/releases/latest/download/apiwatch-x86_64-unknown-linux-gnu.tar.gz
+tar xzf apiwatch-x86_64-unknown-linux-gnu.tar.gz
+install apiwatch-x86_64-unknown-linux-gnu/apiwatch /usr/local/bin/
 ```
 
 ## Quick start
