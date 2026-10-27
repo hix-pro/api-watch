@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-10-28
 
 ### Fixed
 - Schema flattening no longer expands exponentially: a document with two or more self-references under one node (a binary-tree shape) blew up to billions of labels and exhausted memory during `check`. Expansion is now memoized per `$ref` and label and hard-capped at 100,000 facts per pass, recording one deterministic `truncated` marker fact and surfacing a `fact expansion stopped` warning in `check` output.
