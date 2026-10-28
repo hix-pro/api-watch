@@ -364,6 +364,8 @@ The test suite covers OpenAPI, Swagger 2, and YAML flattening, `$ref` resolution
 
 _Part of the **[hix tools](https://github.com/hix-pro#readme)** suite — local-first, no backend, CI-ready._
 
+**Deep dive:** [Breaking API changes you didn't know you shipped](https://hix-pro.github.io/blog/posts/03-api-watch-breaking-api-changes.html)
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
