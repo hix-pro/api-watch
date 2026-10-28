@@ -122,7 +122,7 @@ Headers are stored in the local database so later checks can reuse them. **They 
 | Command | Description |
 | --- | --- |
 | `apiwatch add <source>` | Track a URL or local path. `--name` overrides the derived name; `-H/--header` adds a request header. Re-adding an already-tracked name with the same URL and headers is a no-op that keeps the stored baseline; a different URL or headers exits `1` (use `remove` first to replace the target). |
-| `apiwatch check [name]` | Fetch and compare. No name checks every target. `--json`, `--fail-on-breaking`. |
+| `apiwatch check [name]` | Fetch and compare. No name checks every target. `--json`, `--sarif`, `--fail-on-breaking`. |
 | `apiwatch list` | Show targets and their last result. Alias: `ls`. `--json`. |
 | `apiwatch history <name>` | Show past checks. `--limit` (default 10, max 1000), `--json`. |
 | `apiwatch remove <name>` | Stop tracking and delete snapshots, checks, and changes. Alias: `rm`. |
@@ -212,7 +212,9 @@ The repository ships a composite action that installs API Watch and runs `check`
     check-args: --fail-on-breaking
 ```
 
-Passing `spec` makes cache eviction self-healing: `add` is idempotent, so on a warm cache re-adding the already-tracked name with the same URL and headers is a no-op that keeps the stored baseline (a different URL or headers fails the step, since the name would point at another contract), and on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), and `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you). Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
+Passing `spec` makes cache eviction self-healing: `add` is idempotent, so on a warm cache re-adding the already-tracked name with the same URL and headers is a no-op that keeps the stored baseline (a different URL or headers fails the step, since the name would point at another contract), and on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`.
+
+Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you), `sarif` (default `true`), and `category` (default `apiwatch`). With `sarif: true`, the action writes and uploads a SARIF report, then preserves the check's exit code. The caller needs `security-events: write`; the upload never changes the result. Do not put `--json` in `check-args` when SARIF is enabled. Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
 
 ### Scheduled check with a cached baseline
 
@@ -262,6 +264,41 @@ For local monitoring, a cron entry is enough:
 ```cron
 0 */6 * * * /usr/local/bin/apiwatch check --fail-on-breaking >> /tmp/apiwatch.log 2>&1
 ```
+
+## SARIF output
+
+`apiwatch check --sarif` emits [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) for GitHub code scanning and other SARIF consumers:
+
+```bash
+apiwatch check --sarif > apiwatch.sarif
+```
+
+| Rule | Level | Meaning |
+| --- | --- | --- |
+| `apiwatch/breaking` | `error` | A contract change that can break existing clients |
+| `apiwatch/compatible` | `note` | An additive or relaxed change |
+| `apiwatch/check-error` | `error` | The target could not be fetched or compared |
+
+Each result carries the target name, change label, and detail. When the tracked source is a local spec file, the result points at that file relative to the repository root, so pull requests get file annotations. A remote spec keeps its URL as the artifact location: the alert still names the changed contract, but there is no repository line to annotate.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: dtolnay/rust-toolchain@stable
+  - run: cargo install --git https://github.com/hix-pro/api-watch --locked
+  - run: apiwatch check --sarif --fail-on-breaking > apiwatch.sarif
+  - uses: github/codeql-action/upload-sarif@v3
+    if: always()
+    with:
+      sarif_file: apiwatch.sarif
+      category: apiwatch
+```
+
+The composite action above does this automatically when `sarif: true`. `--sarif` and `--json` are mutually exclusive.
 
 ## JSON output
 

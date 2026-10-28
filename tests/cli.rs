@@ -64,6 +64,70 @@ fn breaking_changes_exit_two_with_fail_on_breaking() {
 }
 
 #[test]
+fn sarif_output_reports_breaking_changes_and_preserves_exit_two() {
+    let dir = std::env::temp_dir().join(format!("apiwatch-cli-sarif-{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("test.db");
+    let spec = dir.join("spec.json");
+    let db = db.to_str().unwrap();
+    let spec_path = spec.to_str().unwrap();
+
+    fs::write(
+        &spec,
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{"/pets":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+    )
+    .unwrap();
+    let added = apiwatch()
+        .args(["--db", db, "add", spec_path, "--name", "t"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let baseline = apiwatch()
+        .args(["--db", db, "check", "t"])
+        .output()
+        .unwrap();
+    assert_eq!(baseline.status.code(), Some(0));
+
+    fs::write(
+        &spec,
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{}}"#,
+    )
+    .unwrap();
+    let output = apiwatch()
+        .args(["--db", db, "check", "t", "--sarif", "--fail-on-breaking"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["version"], "2.1.0");
+    assert_eq!(value["runs"][0]["tool"]["driver"]["name"], "API Watch");
+    let result = &value["runs"][0]["results"][0];
+    assert_eq!(result["ruleId"], "apiwatch/breaking");
+    assert_eq!(result["level"], "error");
+    assert!(
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("spec.json")
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sarif_and_json_are_mutually_exclusive() {
+    let output = apiwatch()
+        .args(["--db", "/tmp/unused.db", "check", "--sarif", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+#[test]
 fn cold_check_without_targets_exits_one() {
     let dir = std::env::temp_dir().join(format!("apiwatch-cli-cold-{}", std::process::id()));
     fs::remove_dir_all(&dir).ok();

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -48,6 +50,275 @@ pub struct TargetReport {
 }
 
 const MAX_PRINTED_CHANGES: usize = 40;
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifLog {
+    #[serde(rename = "$schema")]
+    schema: &'static str,
+    version: &'static str,
+    runs: Vec<SarifRun>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifRun {
+    tool: SarifTool,
+    results: Vec<SarifResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifTool {
+    driver: SarifDriver,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifDriver {
+    name: &'static str,
+    information_uri: &'static str,
+    version: &'static str,
+    rules: Vec<SarifRule>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRule {
+    id: &'static str,
+    name: &'static str,
+    short_description: SarifText,
+    help_uri: &'static str,
+    default_configuration: SarifLevel,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifText {
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifLevel {
+    level: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifResult {
+    rule_id: &'static str,
+    rule_index: usize,
+    level: &'static str,
+    message: SarifText,
+    locations: Vec<SarifLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifLocation {
+    physical_location: SarifPhysicalLocation,
+    logical_locations: Vec<SarifLogicalLocation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifPhysicalLocation {
+    artifact_location: SarifArtifactLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<SarifRegion>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SarifArtifactLocation {
+    uri: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifRegion {
+    start_line: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SarifLogicalLocation {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fully_qualified_name: Option<String>,
+    kind: &'static str,
+}
+
+const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
+const SARIF_HELP_URI: &str = "https://github.com/hix-pro/api-watch#what-counts-as-breaking";
+
+const SARIF_RULES: [(&str, &str, &str, &str); 3] = [
+    (
+        "apiwatch/breaking",
+        "BreakingApiChange",
+        "The API contract changed in a way that can break existing clients.",
+        "error",
+    ),
+    (
+        "apiwatch/compatible",
+        "CompatibleApiChange",
+        "The API contract changed without breaking existing clients.",
+        "note",
+    ),
+    (
+        "apiwatch/check-error",
+        "CheckError",
+        "API Watch could not fetch or compare this target.",
+        "error",
+    ),
+];
+
+fn sarif_rule_index(rule_id: &str) -> usize {
+    SARIF_RULES
+        .iter()
+        .position(|(id, ..)| *id == rule_id)
+        .unwrap_or(0)
+}
+
+/// Code scanning resolves relative artifact URIs against the repository root.
+/// Local specs are made relative to the current directory; remote specs keep
+/// their URL so the alert still names the contract that changed.
+fn sarif_uri(source: &str) -> String {
+    let source = source.strip_prefix("file://").unwrap_or(source);
+    if source.contains("://") {
+        return source.to_owned();
+    }
+
+    let path = Path::new(source);
+    let relative = if path.is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+    } else {
+        Some(path.to_path_buf())
+    };
+
+    let Some(path) = relative else {
+        return source.replace('\\', "/");
+    };
+    let value = path.to_string_lossy().replace('\\', "/");
+    value.strip_prefix("./").unwrap_or(&value).to_owned()
+}
+
+fn sarif_location(report: &TargetReport, label: &str) -> SarifLocation {
+    let source = report.url.strip_prefix("file://").unwrap_or(&report.url);
+    let remote = source.contains("://");
+
+    SarifLocation {
+        physical_location: SarifPhysicalLocation {
+            artifact_location: SarifArtifactLocation {
+                uri: sarif_uri(source),
+            },
+            // A local spec is a repository file, so a file-level annotation is
+            // meaningful. Remote specs have no line to annotate.
+            region: if remote {
+                None
+            } else {
+                Some(SarifRegion { start_line: 1 })
+            },
+        },
+        logical_locations: vec![SarifLogicalLocation {
+            name: report.name.clone(),
+            fully_qualified_name: if label.is_empty() {
+                None
+            } else {
+                Some(label.to_owned())
+            },
+            kind: if label.is_empty() { "module" } else { "member" },
+        }],
+    }
+}
+
+/// SARIF 2.1.0 output for GitHub code scanning and other SARIF consumers.
+pub fn render_sarif(reports: &[TargetReport]) -> Result<String> {
+    let rules = SARIF_RULES
+        .iter()
+        .map(|(id, name, description, level)| SarifRule {
+            id,
+            name,
+            short_description: SarifText {
+                text: (*description).to_owned(),
+            },
+            help_uri: SARIF_HELP_URI,
+            default_configuration: SarifLevel { level },
+        })
+        .collect();
+
+    let mut results = Vec::new();
+    for report in reports {
+        if report.status == CheckStatus::Error {
+            let message = report.message.as_deref().unwrap_or("unknown error");
+            results.push(SarifResult {
+                rule_id: "apiwatch/check-error",
+                rule_index: sarif_rule_index("apiwatch/check-error"),
+                level: "error",
+                message: SarifText {
+                    text: format!("API Watch could not check '{}': {message}", report.name),
+                },
+                locations: vec![sarif_location(report, "")],
+                properties: Some(serde_json::json!({
+                    "target": report.name,
+                    "source": report.url,
+                })),
+            });
+            continue;
+        }
+
+        for change in &report.changes {
+            let (rule_id, level, preamble) = match change.kind {
+                ChangeKind::Breaking => (
+                    "apiwatch/breaking",
+                    "error",
+                    format!("Breaking API change in '{}'", report.name),
+                ),
+                ChangeKind::Compatible => (
+                    "apiwatch/compatible",
+                    "note",
+                    format!("Compatible API change in '{}'", report.name),
+                ),
+            };
+            results.push(SarifResult {
+                rule_id,
+                rule_index: sarif_rule_index(rule_id),
+                level,
+                message: SarifText {
+                    text: format!(
+                        "{preamble}: {} — {}\n\nSource: {}",
+                        change.label, change.detail, report.url
+                    ),
+                },
+                locations: vec![sarif_location(report, &change.label)],
+                properties: Some(serde_json::json!({
+                    "target": report.name,
+                    "area": change.area,
+                    "kind": change.kind,
+                })),
+            });
+        }
+    }
+
+    let log = SarifLog {
+        schema: SARIF_SCHEMA,
+        version: "2.1.0",
+        runs: vec![SarifRun {
+            tool: SarifTool {
+                driver: SarifDriver {
+                    name: "API Watch",
+                    information_uri: "https://github.com/hix-pro/api-watch",
+                    version: env!("CARGO_PKG_VERSION"),
+                    rules,
+                },
+            },
+            results,
+        }],
+    };
+
+    let mut output = serde_json::to_string_pretty(&log)?;
+    output.push('\n');
+    Ok(output)
+}
 
 pub fn print_checks(reports: &[TargetReport], json: bool) -> Result<()> {
     if json {
@@ -475,4 +746,153 @@ fn format_timestamp(iso: &str) -> String {
 
 pub fn status_name(status: CheckStatus) -> &'static str {
     status.label()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{Change, ChangeKind};
+    use crate::spec::Area;
+
+    fn target(url: &str, status: CheckStatus, changes: Vec<Change>) -> TargetReport {
+        TargetReport {
+            name: "orders".to_owned(),
+            url: url.to_owned(),
+            status,
+            checked_at: "2026-10-28T00:00:00Z".to_owned(),
+            format: Some("OpenAPI".to_owned()),
+            title: Some("Orders API".to_owned()),
+            operations: Some(3),
+            facts: Some(17),
+            breaking: changes
+                .iter()
+                .filter(|change| change.kind == ChangeKind::Breaking)
+                .count(),
+            compatible: changes
+                .iter()
+                .filter(|change| change.kind == ChangeKind::Compatible)
+                .count(),
+            http_status: Some(200),
+            message: None,
+            unresolved_refs: 0,
+            truncated: false,
+            changes,
+        }
+    }
+
+    fn change(kind: ChangeKind, area: Area, label: &str, detail: &str) -> Change {
+        Change {
+            kind,
+            area,
+            label: label.to_owned(),
+            detail: detail.to_owned(),
+        }
+    }
+
+    #[test]
+    fn sarif_maps_changes_to_stable_rules_and_locations() {
+        let report = target(
+            "./spec/openapi.json",
+            CheckStatus::Changed,
+            vec![
+                change(
+                    ChangeKind::Breaking,
+                    Area::Operation,
+                    "DELETE /orders/{id}",
+                    "endpoint removed",
+                ),
+                change(
+                    ChangeKind::Compatible,
+                    Area::Parameter,
+                    "GET /orders · query cursor",
+                    "new optional parameter",
+                ),
+            ],
+        );
+
+        let output = render_sarif(&[report]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["version"], "2.1.0");
+        assert_eq!(value["runs"][0]["tool"]["driver"]["name"], "API Watch");
+        assert_eq!(
+            value["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let results = value["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ruleId"], "apiwatch/breaking");
+        assert_eq!(results[0]["level"], "error");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "spec/openapi.json"
+        );
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+            1
+        );
+        assert_eq!(
+            results[0]["locations"][0]["logicalLocations"][0]["fullyQualifiedName"],
+            "DELETE /orders/{id}"
+        );
+        assert_eq!(results[0]["properties"]["area"], "operation");
+        assert!(
+            results[0]["message"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("endpoint removed")
+        );
+
+        assert_eq!(results[1]["ruleId"], "apiwatch/compatible");
+        assert_eq!(results[1]["level"], "note");
+        assert_eq!(results[1]["properties"]["kind"], "compatible");
+    }
+
+    #[test]
+    fn sarif_keeps_remote_sources_and_flags_check_errors() {
+        let mut report = target(
+            "https://example.com/openapi.json",
+            CheckStatus::Error,
+            Vec::new(),
+        );
+        report.message = Some("HTTP 503".to_owned());
+
+        let output = render_sarif(&[report]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let result = &value["runs"][0]["results"][0];
+
+        assert_eq!(result["ruleId"], "apiwatch/check-error");
+        assert_eq!(result["level"], "error");
+        assert_eq!(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "https://example.com/openapi.json"
+        );
+        assert!(result["locations"][0]["physicalLocation"]["region"].is_null());
+        assert!(
+            result["message"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP 503")
+        );
+    }
+
+    #[test]
+    fn sarif_is_a_valid_empty_report_when_nothing_changed() {
+        let report = target("openapi.json", CheckStatus::Unchanged, Vec::new());
+        let output = render_sarif(&[report]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert!(value["runs"][0]["results"].as_array().unwrap().is_empty());
+        assert_eq!(
+            value["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
 }

@@ -78,8 +78,12 @@ pub struct CheckArgs {
     pub name: Option<String>,
 
     /// Print machine-readable JSON
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sarif")]
     pub json: bool,
+
+    /// Print a SARIF 2.1.0 report for GitHub code scanning
+    #[arg(long)]
+    pub sarif: bool,
 
     /// Exit with code 2 when breaking changes are found
     #[arg(long)]
@@ -182,7 +186,11 @@ fn check(store: &mut Store, args: CheckArgs) -> Result<i32> {
         reports.push(check_target(store, &target)?);
     }
 
-    report::print_checks(&reports, args.json)?;
+    if args.sarif {
+        print!("{}", report::render_sarif(&reports)?);
+    } else {
+        report::print_checks(&reports, args.json)?;
+    }
 
     let has_error = reports
         .iter()

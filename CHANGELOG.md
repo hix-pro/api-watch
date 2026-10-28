@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `apiwatch check --sarif` emits a SARIF 2.1.0 report for GitHub code scanning. Breaking changes map to `error`, compatible changes to `note`, and fetch/parse failures to a `check-error` rule. Local specs produce repository-relative file locations for pull request annotations.
+- The composite Action writes and uploads SARIF by default (`sarif: true`), with a `category` input for separating runs. The caller needs `security-events: write`; the upload never changes the check's exit code.
+
 ## [0.3.1] - 2026-10-28
 
 ### Fixed
