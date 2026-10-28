@@ -205,7 +205,7 @@ The key detail: CI needs a persistent baseline. Keep the SQLite database in a ca
 The repository ships a composite action that installs API Watch and runs `check` — no Rust setup in your workflow:
 
 ```yaml
-- uses: hix-pro/api-watch@v0.3.1
+- uses: hix-pro/api-watch@main
   with:
     spec: openapi.yaml        # re-added automatically when the cache is cold
     name: my-api
@@ -214,7 +214,7 @@ The repository ships a composite action that installs API Watch and runs `check`
 
 Passing `spec` makes cache eviction self-healing: `add` is idempotent, so on a warm cache re-adding the already-tracked name with the same URL and headers is a no-op that keeps the stored baseline (a different URL or headers fails the step, since the name would point at another contract), and on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`.
 
-Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you), `sarif` (default `true`), and `category` (default `apiwatch`). With `sarif: true`, the action writes and uploads a SARIF report, then preserves the check's exit code. The caller needs `security-events: write`; the upload never changes the result. Do not put `--json` in `check-args` when SARIF is enabled. Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
+The SARIF support in this section is on `main` until the next tagged release; pin that tag when it is published. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you), `sarif` (default `true`), and `category` (default `apiwatch`). With `sarif: true`, the action writes and uploads a SARIF report, then preserves the check's exit code. The caller needs `security-events: write`; the upload never changes the result. Do not put `--json` in `check-args` when SARIF is enabled. Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
 
 ### Scheduled check with a cached baseline
 
