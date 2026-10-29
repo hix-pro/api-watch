@@ -1117,6 +1117,73 @@ mod tests {
     }
 
     #[test]
+    fn flattens_openapi_31_type_arrays_const_and_defs() {
+        let value = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Events", "version": "1.0.0" },
+            "paths": {
+                "/events": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "$ref": "#/components/schemas/Event" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Event": {
+                        "type": "object",
+                        "required": ["id", "kind"],
+                        "properties": {
+                            "id": { "type": "string" },
+                            "kind": { "const": "created" },
+                            "note": { "type": ["string", "null"] },
+                            "link": { "$ref": "#/components/schemas/Link" }
+                        }
+                    },
+                    "Link": {
+                        "$defs": {
+                            "URL": { "type": "string", "format": "uri" }
+                        },
+                        "type": "object",
+                        "properties": {
+                            "href": { "$ref": "#/components/schemas/Link/$defs/URL" }
+                        }
+                    }
+                }
+            }
+        });
+
+        let flattened = flatten(&value, Format::OpenApi).unwrap();
+        assert_eq!(flattened.operations, 1);
+        assert_eq!(flattened.unresolved_refs, 0);
+        assert_eq!(flattened.title.as_deref(), Some("Events 1.0.0"));
+
+        let kind = flattened
+            .facts
+            .get("GET /events · 200 application/json.kind")
+            .unwrap();
+        assert_eq!(kind.enum_values, vec!["created"]);
+        let note = flattened
+            .facts
+            .get("GET /events · 200 application/json.note")
+            .unwrap();
+        assert_eq!(note.type_name, "string|null");
+        let href = flattened
+            .facts
+            .get("GET /events · 200 application/json.link.href")
+            .unwrap();
+        assert_eq!(href.format.as_deref(), Some("uri"));
+    }
+
+    #[test]
     fn flattens_swagger2_parameters_media_types_and_response_headers() {
         let value = serde_json::json!({
             "swagger": "2.0",

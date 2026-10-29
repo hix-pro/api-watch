@@ -387,7 +387,7 @@ apiwatch history petstore --json
 
 ## Limitations
 
-- **OpenAPI 3.x and Swagger 2.0 only** (plus generic JSON). External `$ref`s are not fetched; unresolved refs are counted and shown as a warning.
+- **OpenAPI 3.0 and 3.1, and Swagger 2.0 only** (plus generic JSON). OpenAPI 3.1 `type` arrays, `const`, and `$defs` references are supported. External `$ref`s are not fetched; unresolved refs are counted and shown as a warning.
 - **Not a full JSON Schema prover.** `allOf`, `oneOf`, and `anyOf` are traversed, and `allOf` required fields are merged across branches, but composition is not fully proven. Unusual schemas can produce approximate results.
 - **Static headers only.** No OAuth2 client-credentials flow, mTLS, or signed requests.
 - **No notifications built in.** Use cron/CI and route stdout, or consume `--json`.
