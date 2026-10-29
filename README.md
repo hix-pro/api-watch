@@ -102,6 +102,9 @@ apiwatch check my-api
 # Check everything and gate CI on breaking changes
 apiwatch check --fail-on-breaking
 
+# Compare a candidate spec to the saved baseline without writing history
+apiwatch verify my-api ./openapi.next.yaml --fail-on-breaking
+
 # Inspect
 apiwatch list
 apiwatch history petstore --limit 20
@@ -123,6 +126,7 @@ Headers are stored in the local database so later checks can reuse them. **They 
 | --- | --- |
 | `apiwatch add <source>` | Track a URL or local path. `--name` overrides the derived name; `-H/--header` adds a request header. Re-adding an already-tracked name with the same URL and headers is a no-op that keeps the stored baseline; a different URL or headers exits `1` (use `remove` first to replace the target). |
 | `apiwatch check [name]` | Fetch and compare. No name checks every target. `--json`, `--sarif`, `--fail-on-breaking`. |
+| `apiwatch verify <name> <source>` | Compare a candidate URL or local file against the saved baseline without recording a check or snapshot. `-H/--header`, `--json`, `--sarif`, `--fail-on-breaking`. |
 | `apiwatch list` | Show targets and their last result. Alias: `ls`. `--json`. |
 | `apiwatch history <name>` | Show past checks. `--limit` (default 10, max 1000), `--json`. |
 | `apiwatch remove <name>` | Stop tracking and delete snapshots, checks, and changes. Alias: `rm`. |
@@ -134,10 +138,34 @@ Global option: `--db <path>` selects the database (default `~/.apiwatch/apiwatch
 | Code | Meaning |
 | --- | --- |
 | `0` | All targets checked. Includes compatible-only changes, and breaking changes **without** `--fail-on-breaking`. |
-| `1` | Fetch, parse, or usage error (also recorded in history). |
+| `1` | Fetch, parse, or usage error (also recorded in history for `check`). |
 | `2` | Breaking changes found **and** `--fail-on-breaking` was set. |
 
 This distinction matters: a tool that always exits non-zero on changes cannot be used for monitoring without also failing on safe additions.
+
+## Verify a candidate spec
+
+`check` writes to history and advances the baseline. That is right for a scheduled watch, but wrong for a pull request: the candidate should be compared against the baseline on `main`, not replace it. `verify` does exactly that.
+
+```bash
+# Baseline already recorded by an earlier check
+apiwatch verify orders ./api/openapi.yaml --fail-on-breaking
+```
+
+`verify` accepts a URL or a local path, reads the latest stored snapshot for the target, and prints the same text, JSON, or SARIF report as `check`. It never records a check and never writes a snapshot. `--fail-on-breaking` exits `2` for breaking changes; without it, the command reports and exits `0`. A missing baseline exits `1` with the command to run first.
+
+In a pull request workflow, restore or cache the database from the base branch, then verify the spec in the checkout:
+
+```yaml
+- uses: actions/cache/restore@v4
+  with:
+    path: ~/.apiwatch
+    key: apiwatch-main
+- name: Verify the API contract
+  run: apiwatch verify orders ./openapi.yaml --fail-on-breaking
+```
+
+Add `--sarif` to upload the result to code scanning. Annotations point at the candidate file, not the stored target URL.
 
 ## What counts as breaking
 
@@ -205,7 +233,7 @@ The key detail: CI needs a persistent baseline. Keep the SQLite database in a ca
 The repository ships a composite action that installs API Watch and runs `check` — no Rust setup in your workflow:
 
 ```yaml
-- uses: hix-pro/api-watch@main
+- uses: hix-pro/api-watch@v0.4.0
   with:
     spec: openapi.yaml        # re-added automatically when the cache is cold
     name: my-api
@@ -214,7 +242,7 @@ The repository ships a composite action that installs API Watch and runs `check`
 
 Passing `spec` makes cache eviction self-healing: `add` is idempotent, so on a warm cache re-adding the already-tracked name with the same URL and headers is a no-op that keeps the stored baseline (a different URL or headers fails the step, since the name would point at another contract), and on a cold cache it restores the tracking entry so the first check records a fresh baseline and exits `0`.
 
-The SARIF support in this section is on `main` until the next tagged release; pin that tag when it is published. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you), `sarif` (default `true`), and `category` (default `apiwatch`). With `sarif: true`, the action writes and uploads a SARIF report, then preserves the check's exit code. The caller needs `security-events: write`; the upload never changes the result. Do not put `--json` in `check-args` when SARIF is enabled. Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
+The SARIF support in this section is available from `v0.4.0`. Inputs: `spec`, `name`, `check-args` (for example `--fail-on-breaking`), `db-path` (default `~/.apiwatch/apiwatch.db`, with `~` expanded for you), `sarif` (default `true`), and `category` (default `apiwatch`). With `sarif: true`, the action writes and uploads a SARIF report, then preserves the check's exit code. The caller needs `security-events: write`; the upload never changes the result. Do not put `--json` in `check-args` when SARIF is enabled. Keep the database across runs with `actions/cache` as shown in the previous section — the action does not manage caching itself. The repository's own pipeline tracks `examples/spec.yaml` through the action in a Dogfood workflow.
 
 ### Scheduled check with a cached baseline
 
@@ -304,6 +332,7 @@ The composite action above does this automatically when `sarif: true`. `--sarif`
 
 ```bash
 apiwatch check --json
+apiwatch verify orders ./openapi.yaml --json
 apiwatch list --json
 apiwatch history petstore --json
 ```

@@ -236,3 +236,121 @@ fn readding_a_different_url_exits_one_with_guidance() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn verify_reports_breaking_changes_without_recording_history() {
+    let dir = std::env::temp_dir().join(format!("apiwatch-cli-verify-{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("test.db").to_str().unwrap().to_string();
+    let baseline = dir.join("baseline.json").to_str().unwrap().to_string();
+    let candidate = dir.join("candidate.json").to_str().unwrap().to_string();
+
+    fs::write(
+        &baseline,
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{"/pets":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+    )
+    .unwrap();
+    let added = apiwatch()
+        .args(["--db", &db, "add", &baseline, "--name", "t"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let check = apiwatch()
+        .args(["--db", &db, "check", "t"])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0), "{check:?}");
+
+    fs::write(
+        &candidate,
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{}}"#,
+    )
+    .unwrap();
+
+    let verify = apiwatch()
+        .args(["--db", &db, "verify", "t", &candidate, "--fail-on-breaking"])
+        .output()
+        .unwrap();
+    assert_eq!(verify.status.code(), Some(2), "{verify:?}");
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(stdout.contains("endpoint removed"), "{stdout}");
+    assert!(
+        stdout.contains("candidate compared with the baseline"),
+        "{stdout}"
+    );
+
+    // The comparison must not add a check to the target's history.
+    let history = apiwatch()
+        .args(["--db", &db, "history", "t", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(value["total"], 1, "{value}");
+
+    let sarif = apiwatch()
+        .args([
+            "--db",
+            &db,
+            "verify",
+            "t",
+            &candidate,
+            "--sarif",
+            "--fail-on-breaking",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(sarif.status.code(), Some(2), "{sarif:?}");
+    let value: serde_json::Value = serde_json::from_slice(&sarif.stdout).unwrap();
+    assert_eq!(
+        value["runs"][0]["results"][0]["ruleId"],
+        "apiwatch/breaking"
+    );
+    assert!(
+        value["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+            ["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("candidate.json")
+    );
+
+    // Report-only mode is the default.
+    let report_only = apiwatch()
+        .args(["--db", &db, "verify", "t", &candidate])
+        .output()
+        .unwrap();
+    assert_eq!(report_only.status.code(), Some(0), "{report_only:?}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn verify_without_a_baseline_exits_one() {
+    let dir =
+        std::env::temp_dir().join(format!("apiwatch-cli-verify-empty-{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("test.db").to_str().unwrap().to_string();
+    let spec = dir.join("spec.json").to_str().unwrap().to_string();
+    fs::write(
+        &spec,
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{}}"#,
+    )
+    .unwrap();
+
+    let added = apiwatch()
+        .args(["--db", &db, "add", &spec, "--name", "t"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let verify = apiwatch()
+        .args(["--db", &db, "verify", "t", &spec])
+        .output()
+        .unwrap();
+    assert_eq!(verify.status.code(), Some(1), "{verify:?}");
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("has no baseline yet"), "{stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}

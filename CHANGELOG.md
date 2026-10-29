@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
 ### Added
+- `apiwatch verify <name> <source>` compares a candidate URL or local file against the saved baseline without recording a check or snapshot. It supports text, JSON, and SARIF output, `-H/--header`, and `--fail-on-breaking`, so a pull request can be checked against `main` without mutating the history.
 - `apiwatch check --sarif` emits a SARIF 2.1.0 report for GitHub code scanning. Breaking changes map to `error`, compatible changes to `note`, and fetch/parse failures to a `check-error` rule. Local specs produce repository-relative file locations for pull request annotations.
 - The composite Action writes and uploads SARIF by default (`sarif: true`), with a `category` input for separating runs. The caller needs `security-events: write`; the upload never changes the check's exit code.
 

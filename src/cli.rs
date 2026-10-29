@@ -23,6 +23,7 @@ use crate::spec::{self, Format};
         apiwatch add https://petstore3.swagger.io/api/v3/openapi.json --name petstore\n  \
         apiwatch check petstore\n  \
         apiwatch check --fail-on-breaking\n  \
+        apiwatch verify petstore ./openapi.yaml --fail-on-breaking\n  \
         apiwatch list\n  \
         apiwatch history petstore --limit 20"
 )]
@@ -54,6 +55,8 @@ pub enum Command {
     },
     /// Fetch specs and report contract changes
     Check(CheckArgs),
+    /// Compare a candidate spec against the saved baseline without recording a check
+    Verify(VerifyArgs),
     /// Show the check history for one target
     History(HistoryArgs),
 }
@@ -76,6 +79,31 @@ pub struct AddArgs {
 pub struct CheckArgs {
     /// Check only this target (default: all targets)
     pub name: Option<String>,
+
+    /// Print machine-readable JSON
+    #[arg(long, conflicts_with = "sarif")]
+    pub json: bool,
+
+    /// Print a SARIF 2.1.0 report for GitHub code scanning
+    #[arg(long)]
+    pub sarif: bool,
+
+    /// Exit with code 2 when breaking changes are found
+    #[arg(long)]
+    pub fail_on_breaking: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// Tracked target whose latest snapshot is the baseline
+    pub name: String,
+
+    /// Candidate spec: URL or local path to an OpenAPI, Swagger, or JSON document
+    pub source: String,
+
+    /// Extra HTTP header, for example "Authorization: Bearer $TOKEN"
+    #[arg(short = 'H', long = "header", value_name = "NAME: VALUE")]
+    pub headers: Vec<String>,
 
     /// Print machine-readable JSON
     #[arg(long, conflicts_with = "sarif")]
@@ -119,6 +147,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Check(args) => check(&mut store, args),
+        Command::Verify(args) => verify(&store, args),
         Command::History(args) => history(&store, args),
     }
 }
@@ -201,6 +230,92 @@ fn check(store: &mut Store, args: CheckArgs) -> Result<i32> {
         return Ok(1);
     }
     if args.fail_on_breaking && has_breaking {
+        return Ok(2);
+    }
+    Ok(0)
+}
+
+fn verify(store: &Store, args: VerifyArgs) -> Result<i32> {
+    let target = store
+        .target(&args.name)?
+        .with_context(|| format!("target '{}' not found", args.name))?;
+    let baseline = store.latest_snapshot(target.id)?.with_context(|| {
+        format!(
+            "target '{}' has no baseline yet. Run `apiwatch check {}` first.",
+            target.name, target.name
+        )
+    })?;
+
+    let source = args.source.trim();
+    if source.is_empty() {
+        bail!("source cannot be empty");
+    }
+    let headers = parse_headers(&args.headers)?;
+    let fetched = fetch::fetch(source, &headers, None)
+        .with_context(|| format!("reading candidate spec {source}"))?;
+    let body = fetched
+        .body
+        .context("the candidate returned success but no response body")?;
+
+    let (value, format) =
+        spec::parse_document(&body).with_context(|| format!("parsing candidate spec {source}"))?;
+    let baseline_format = format_from_db(&baseline.format)?;
+    if baseline_format != format {
+        bail!(
+            "candidate is {} but the baseline is {}. Remove and re-add the target to reset the baseline.",
+            format.label(),
+            baseline_format.label()
+        );
+    }
+    let flattened = spec::flatten(&value, format)
+        .with_context(|| format!("flattening candidate spec {source}"))?;
+
+    let (baseline_value, _) =
+        spec::parse_document(&baseline.content).context("could not parse the stored baseline")?;
+    let baseline_flat = spec::flatten(&baseline_value, baseline_format)
+        .context("could not flatten the stored baseline")?;
+
+    let changes = diff::diff(&baseline_flat.facts, &flattened.facts);
+    let status = if changes.is_empty() {
+        CheckStatus::Unchanged
+    } else {
+        CheckStatus::Changed
+    };
+    let message = if changes.is_empty() {
+        format!(
+            "candidate matches the baseline captured {}",
+            baseline.captured_at
+        )
+    } else {
+        format!(
+            "candidate compared with the baseline captured {}",
+            baseline.captured_at
+        )
+    };
+
+    // The report points at the candidate file so SARIF annotations land on the
+    // spec under review, not on the stored target URL.
+    let mut display = target.clone();
+    display.url = source.to_string();
+    let report = report_from_flattened(
+        &display,
+        status,
+        now(),
+        format,
+        &flattened,
+        fetched.http_status,
+        Some(message),
+        changes,
+    );
+    let breaking = report.breaking;
+
+    if args.sarif {
+        print!("{}", report::render_sarif(&[report])?);
+    } else {
+        report::print_checks(&[report], args.json)?;
+    }
+
+    if args.fail_on_breaking && breaking > 0 {
         return Ok(2);
     }
     Ok(0)
