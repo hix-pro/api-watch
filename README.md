@@ -319,7 +319,7 @@ steps:
   - uses: dtolnay/rust-toolchain@stable
   - run: cargo install --git https://github.com/hix-pro/api-watch --locked
   - run: apiwatch check --sarif --fail-on-breaking > apiwatch.sarif
-  - uses: github/codeql-action/upload-sarif@v3
+  - uses: github/codeql-action/upload-sarif@v4
     if: always()
     with:
       sarif_file: apiwatch.sarif
