@@ -14,7 +14,7 @@ jobs:
     name: api-watch tracks its example spec
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Uses the action.yml in this repository. Every run starts from a cold
       # database, so this exercises the documented first-run path: record a
